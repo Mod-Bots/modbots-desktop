@@ -1,6 +1,6 @@
 [package]
 name = "modbots-desktop"
-version = "0.0.0"
+version = "0.0.1-alpha"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-http = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,0 +1,25 @@
+.modbots-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+
+  &::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: #2f2f35;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background: #44444d;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+}

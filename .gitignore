@@ -52,3 +52,7 @@ src-tauri/gen/schemas/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local working docs (private, not for publish)
+_docs/
+_dev/
