@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "modbots-desktop",
+  "productName": "Mod Bots Desktop",
   "version": "0.1.0",
   "identifier": "com.wsawyerr.modbots-desktop",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "modbots-desktop",
-        "width": 800,
-        "height": 600
+        "title": "Mod Bots",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 700
       }
     ],
     "security": {
