@@ -41,7 +41,10 @@ export const setSessionToken = (token: string | null): void => {
   sessionToken = token;
 };
 
-const fetchRequest = (url: string, init?: RequestInit): Promise<Response> =>
+export const fetchRequest = (
+  url: string,
+  init?: RequestInit,
+): Promise<Response> =>
   isTauri() ? tauriFetch(url, init) : globalThis.fetch(url, init);
 
 const requestJson = async <Result>(
@@ -146,22 +149,16 @@ export const joinAsGuest = async (
     }),
   );
 
-export const registerActor = async (
-  username: string,
-  displayName: string | null,
-  acceptPolicy: boolean,
-): Promise<JoinOutcome> =>
-  normalizeJoinResponse(
-    await requestJson<JoinResponse>(apiUrl("/api/registrations"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        acceptPolicy,
-        username,
-        ...(displayName === null ? {} : { displayName }),
-      }),
-    }),
-  );
+// The browser sign-in hand-off's final step: the access token from the
+// account site is exchanged at the backend for a platform session.
+export const exchangeAccountToken = (
+  accessToken: string,
+): Promise<{ actor: Actor; session: { token: string; expiresAt: string } }> =>
+  requestJson(apiUrl("/api/sessions/exchange"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ accessToken }),
+  });
 
 export const setRoomPresence = (
   roomId: string,

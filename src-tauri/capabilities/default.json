@@ -5,7 +5,13 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "dialog:default",
+    "fs:default",
+    "notification:default",
     "opener:default",
+    "updater:default",
+    "upload:default",
+    "window-state:default",
     {
       "identifier": "http:default",
       "allow": [
@@ -20,6 +26,12 @@
         },
         {
           "url": "http://127.0.0.1:3002/**"
+        },
+        {
+          "url": "http://localhost:3003/**"
+        },
+        {
+          "url": "http://127.0.0.1:3003/**"
         }
       ]
     }

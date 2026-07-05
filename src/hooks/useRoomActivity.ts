@@ -28,16 +28,15 @@ import {
   joinAsGuest,
   PlatformRequestError,
   postRoomMessage,
-  registerActor,
   setRoomPresence,
   setSessionToken,
 } from "../data/platform";
+import type { BrowserLoginOutcome } from "../data/oauth";
 import { runWebSocket, runWebTransport } from "../data/realtime";
 import { mergeEvents, onlineActorIds } from "../data/room-state";
 
+// Guest walk-in is the only in-app entry; accounts sign in on the website.
 export interface JoinRequest {
-  mode: "guest" | "register";
-  username: string;
   displayName: string;
   acceptPolicy: boolean;
 }
@@ -142,7 +141,8 @@ export const useRoomActivity = (roomId: string) => {
         return null;
       }
 
-      await setRoomPresence(roomId, actor.id, "joined");
+      // Validation only: entering the room (presence) is an explicit act
+      // from the start screen, never a side effect of launching the app.
       return actor;
     },
     staleTime: Number.POSITIVE_INFINITY,
@@ -163,17 +163,10 @@ export const useRoomActivity = (roomId: string) => {
   const join = useMutation({
     mutationFn: async (request: JoinRequest): Promise<StoredIdentity> => {
       const displayName = request.displayName.trim();
-      const outcome =
-        request.mode === "guest"
-          ? await joinAsGuest(
-              displayName.length === 0 ? null : displayName,
-              request.acceptPolicy,
-            )
-          : await registerActor(
-              request.username.trim(),
-              displayName.length === 0 ? null : displayName,
-              request.acceptPolicy,
-            );
+      const outcome = await joinAsGuest(
+        displayName.length === 0 ? null : displayName,
+        request.acceptPolicy,
+      );
       const stored: StoredIdentity = {
         actorId: outcome.actor.id,
         token: outcome.session?.token ?? null,
@@ -189,6 +182,18 @@ export const useRoomActivity = (roomId: string) => {
       setIdentity(stored);
     },
   });
+  // A completed browser login (automatic return or pasted code) becomes
+  // the app's identity and session.
+  const adoptBrowserLogin = (outcome: BrowserLoginOutcome): void => {
+    const stored: StoredIdentity = {
+      actorId: outcome.actor.id,
+      token: outcome.session.token,
+    };
+
+    saveStoredIdentity(stored);
+    setSessionToken(stored.token);
+    setIdentity(stored);
+  };
   const sendMessage = useMutation({
     mutationFn: async (message: {
       content: string;
@@ -212,6 +217,14 @@ export const useRoomActivity = (roomId: string) => {
       void queryClient.invalidateQueries({ queryKey: overviewKey });
     },
   });
+  // The explicit step through the room door: presence joins only when the
+  // person chooses to enter from the start screen.
+  const enterRoom = async (): Promise<void> => {
+    if (localActor !== undefined) {
+      await setRoomPresence(roomId, localActor.id, "joined");
+    }
+  };
+
   const signOut = async (): Promise<void> => {
     const actorId = identity?.actorId ?? null;
 
@@ -382,8 +395,10 @@ export const useRoomActivity = (roomId: string) => {
 
   return {
     actors,
+    adoptBrowserLogin,
     apiHealth,
     desktopSession,
+    enterRoom,
     events,
     hasIdentity: identity !== null,
     join,

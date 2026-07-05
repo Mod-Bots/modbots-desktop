@@ -1,35 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import startScreenBg from "./assets/start-screen-bg.png";
 import {
+  ArrowRight,
   Bot,
+  CalendarDays,
   Check,
   ChevronDown,
   CircleAlert,
+  Copy,
   CornerUpLeft,
   DoorOpen,
+  LogOut,
   Image,
-  LogIn,
   MessageSquare,
   Mic,
   MicOff,
   MoreHorizontal,
   Paperclip,
   Reply,
-  ScrollText,
   Search,
   Send,
   Shield,
   SmilePlus,
-  UserPlus,
   Users,
   X,
 } from "lucide-react";
+import type { Actor, ActorType, RoomEvent } from "./data/contracts";
+import { getBrowserLoginSession, openInBrowser } from "./data/oauth";
 import type {
-  Actor,
-  ActorType,
-  ParticipationPolicy,
-  RoomEvent,
-} from "./data/contracts";
+  BrowserLoginOutcome,
+  BrowserLoginSession,
+} from "./data/oauth";
 import { isMutedError, PlatformRequestError } from "./data/platform";
 import { actorLabel } from "./data/room-state";
 import { useRoomActivity } from "./hooks/useRoomActivity";
@@ -38,6 +40,10 @@ import "./App.css";
 
 const roomId = "global-lobby";
 const roomName = "Room";
+// The policy is read on the account site, never rendered in the app.
+const accountUrl =
+  import.meta.env.VITE_MODBOTS_ACCOUNT_URL ?? "http://localhost:3003";
+const policyUrl = `${accountUrl}/policy`;
 const roomAbout =
   "A live chatroom where humans and chat bots talk, and mod bots learn " +
   "to moderate from everything that happens.";
@@ -89,6 +95,13 @@ const formatTime = (value: string): string =>
   new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
     minute: "2-digit",
+  }).format(new Date(value));
+
+const memberSince = (value: string): string =>
+  new Intl.DateTimeFormat(undefined, {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
   }).format(new Date(value));
 
 const startOfDay = (date: Date): number =>
@@ -572,7 +585,7 @@ const joinErrorText = (error: unknown): string => {
     }
 
     if (error.code === "policy_not_accepted") {
-      return "You must accept the participation policy before joining.";
+      return "You must accept the Participation Policy before joining.";
     }
   }
 
@@ -580,50 +593,112 @@ const joinErrorText = (error: unknown): string => {
 };
 
 const joinInputClass =
-  "h-10 w-full rounded-lg border border-white/10 bg-[#181818] px-3 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-white/25";
+  "h-10 w-full rounded-md border border-white/10 bg-[#181818] px-3 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-white/25";
 
-function PolicySection({ label, text }: { label: string; text: string }) {
-  return (
-    <div>
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-        {label}
-      </p>
-      <p className="mt-1 text-sm leading-6 text-zinc-400">{text}</p>
-    </div>
-  );
-}
-
-function JoinPanel({
-  policy,
-  policyLoading,
-  policyError,
+function StartScreen({
   joinPending,
   joinError,
-  onRetryPolicy,
   onJoin,
+  onSignedIn,
 }: {
-  policy: ParticipationPolicy | undefined;
-  policyLoading: boolean;
-  policyError: Error | null;
   joinPending: boolean;
   joinError: Error | null;
-  onRetryPolicy: () => void;
   onJoin: (request: JoinRequest) => void;
+  onSignedIn: (outcome: BrowserLoginOutcome) => void;
 }) {
-  const [mode, setMode] = useState<"guest" | "register">("guest");
-  const [username, setUsername] = useState("");
+  const [session, setSession] = useState<BrowserLoginSession | null>(null);
+  const [waitingForBrowser, setWaitingForBrowser] = useState(false);
+  const [authCode, setAuthCode] = useState("");
+  const [codePending, setCodePending] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [accepted, setAccepted] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  const errorText =
+  const guestError =
     localError ?? (joinError !== null ? joinErrorText(joinError) : null);
 
-  const selectMode = (nextMode: "guest" | "register") => {
-    setMode(nextMode);
-    setLocalError(null);
+  // The sign-in address exists as soon as the screen does: the loopback
+  // listener arms immediately, so the URL works whether the person clicks
+  // Continue in browser or copies it into a browser of their choosing.
+  useEffect(() => {
+    let cancelled = false;
+
+    void getBrowserLoginSession().then((prepared) => {
+      if (cancelled) {
+        return;
+      }
+
+      setSession(prepared);
+      prepared.automatic.then(
+        (outcome) => {
+          if (!cancelled) {
+            onSignedIn(outcome);
+          }
+        },
+        (error: unknown) => {
+          if (!cancelled) {
+            setWaitingForBrowser(false);
+            setLoginError(
+              error instanceof Error
+                ? error.message
+                : "The Browser log-in did not complete.",
+            );
+          }
+        },
+      );
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const copyLoginUrl = () => {
+    if (session === null) {
+      return;
+    }
+
+    void navigator.clipboard.writeText(session.authorizeUrl).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    });
   };
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const continueInBrowser = () => {
+    if (session === null) {
+      return;
+    }
+
+    setLoginError(null);
+    setWaitingForBrowser(true);
+    void openInBrowser(session.authorizeUrl);
+  };
+
+  const submitCode = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (session === null || codePending || authCode.trim().length === 0) {
+      return;
+    }
+
+    setLoginError(null);
+    setCodePending(true);
+    session.completeWithCode(authCode).then(
+      (outcome) => onSignedIn(outcome),
+      (error: unknown) => {
+        setCodePending(false);
+        setLoginError(
+          error instanceof Error
+            ? error.message
+            : "The authorization code was not accepted.",
+        );
+      },
+    );
+  };
+
+  const submitGuest = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     if (joinPending) {
@@ -631,203 +706,213 @@ function JoinPanel({
     }
 
     if (!accepted) {
-      setLocalError(
-        "You must accept the participation policy before joining.",
-      );
-      return;
-    }
-
-    if (mode === "register" && username.trim().length === 0) {
-      setLocalError("A username is required to register.");
+      setLocalError("You must accept the Participation Policy to enter.");
       return;
     }
 
     setLocalError(null);
-    onJoin({ mode, username, displayName, acceptPolicy: accepted });
+    onJoin({ displayName, acceptPolicy: accepted });
+  };
+
+  const openPolicy = () => {
+    void openInBrowser(policyUrl);
   };
 
   return (
-    <section className="modbots-scroll flex min-w-0 flex-1 flex-col overflow-y-auto">
-      <div className="mx-auto w-full max-w-[560px] px-6 py-10">
-        <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-[#171717] text-zinc-300">
-          <LogIn className="h-5 w-5" />
+    <section className="modbots-scroll relative flex min-h-0 flex-1 overflow-y-auto">
+      <div
+        className="pointer-events-none absolute inset-0 bg-cover bg-center"
+        style={{ backgroundImage: `url(${startScreenBg})` }}
+        aria-hidden="true"
+      />
+      <div
+        className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/50 via-black/35 to-black/60"
+        aria-hidden="true"
+      />
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(620px 720px at 50% 50%, rgba(0,0,0,0.8), rgba(0,0,0,0.35) 58%, transparent 78%)",
+        }}
+        aria-hidden="true"
+      />
+      <div className="relative mx-auto flex w-full max-w-[420px] flex-col justify-center px-6 py-12">
+        <div className="text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-white/10 bg-[#171717]">
+            <Bot className="h-6 w-6 text-zinc-200" />
+          </div>
+          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-white">
+            Mod Bots
+          </h1>
+          <p className="mx-auto mt-2 max-w-[34ch] text-sm leading-6 text-zinc-500">
+            {roomAbout}
+          </p>
         </div>
-        <h2 className="mt-4 text-lg font-semibold text-zinc-100">
-          Join the room
-        </h2>
-        <p className="mt-1 text-sm leading-6 text-zinc-500">
-          Walk in as a guest or register a username. Review and accept the
-          participation policy first.
-        </p>
 
-        <div className="mt-6 rounded-2xl border border-white/10 bg-[#141414] p-4">
-          <div className="flex items-center gap-2 text-zinc-300">
-            <ScrollText className="h-4 w-4 shrink-0" />
-            <h3 className="text-sm font-semibold">Participation policy</h3>
-            {policy !== undefined ? (
-              <span className="ml-auto text-[11px] text-zinc-600">
-                Version {policy.version}
-              </span>
-            ) : null}
+        <div className="mt-8 rounded-lg border border-white/10 bg-[#141414]/90 p-5 shadow-[0_16px_50px_rgba(0,0,0,0.5)] backdrop-blur-sm">
+          <h2 className="text-sm font-semibold text-zinc-100">Log in</h2>
+
+          <div className="mt-3 flex items-center gap-1.5 rounded-md border border-white/10 bg-[#0f0f0f] py-1.5 pl-3 pr-1.5">
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-400">
+              {session?.authorizeUrl ?? "Preparing your log-in link..."}
+            </span>
+            <button
+              type="button"
+              onClick={copyLoginUrl}
+              disabled={session === null}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-not-allowed"
+              aria-label="Copy the log-in link"
+              title="Copy"
+            >
+              {copied ? (
+                <Check className="h-3.5 w-3.5" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </button>
           </div>
 
-          {policyLoading ? (
-            <p className="mt-3 text-sm text-zinc-500">
-              Loading the participation policy...
-            </p>
-          ) : policy !== undefined ? (
-            <div className="mt-3 space-y-3">
-              <PolicySection
-                label="Moderation access"
-                text={policy.moderationAccess}
+          <form onSubmit={submitCode} className="mt-3">
+            <div className="flex items-center gap-1.5 rounded-md border border-white/10 bg-[#0f0f0f] py-1.5 pl-3 pr-1.5 focus-within:border-white/25">
+              <input
+                value={authCode}
+                onChange={(event) => setAuthCode(event.currentTarget.value)}
+                placeholder="Authorization code (optional)"
+                autoComplete="off"
+                spellCheck={false}
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-zinc-200 outline-none placeholder:text-zinc-600"
               />
-              <PolicySection label="Training use" text={policy.trainingUse} />
-              <PolicySection label="Retention" text={policy.retention} />
-            </div>
-          ) : (
-            <div className="mt-3 flex items-center justify-between gap-3">
-              <p className="text-sm text-zinc-400">
-                {policyError !== null
-                  ? policyError.message
-                  : "The participation policy could not be loaded."}
-              </p>
               <button
-                type="button"
-                onClick={onRetryPolicy}
-                className="shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium text-white hover:bg-white/[0.07]"
+                type="submit"
+                disabled={authCode.trim().length === 0 || codePending}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-zinc-500"
+                aria-label="Log in with the authorization code"
+                title="Log in with this code"
               >
-                Retry
+                <ArrowRight className="h-3.5 w-3.5" />
               </button>
             </div>
-          )}
+          </form>
+
+          {loginError !== null ? (
+            <div className="mt-3 flex items-start gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-300">
+              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
+              <span>{loginError}</span>
+            </div>
+          ) : null}
 
           <button
             type="button"
-            onClick={() => {
-              setAccepted((value) => !value);
-              setLocalError(null);
-            }}
-            aria-pressed={accepted}
-            className="mt-4 flex w-full items-start gap-3 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-left transition hover:bg-white/[0.05]"
+            onClick={continueInBrowser}
+            disabled={session === null || codePending}
+            className="mt-4 flex h-11 w-full items-center justify-center rounded-md bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#141414] disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
           >
-            <span
-              className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                accepted
-                  ? "border-white bg-white text-black"
-                  : "border-zinc-600 text-transparent"
-              }`}
-            >
-              <Check className="h-3 w-3" />
+            {waitingForBrowser ? "Waiting for your Browser..." : "Continue in Browser"}
+          </button>
+          {waitingForBrowser && loginError === null ? (
+            <p className="mt-2 text-center text-[11px] leading-5 text-zinc-500">
+              Nothing happening? Click again to reopen your Browser.
+            </p>
+          ) : null}
+
+          <div className="my-5 flex items-center gap-3">
+            <span className="h-px flex-1 bg-white/[0.08]" />
+            <span className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-600">
+              or
             </span>
-            <span className="text-sm text-zinc-300">
-              I accept the participation policy.
-            </span>
-          </button>
-        </div>
+            <span className="h-px flex-1 bg-white/[0.08]" />
+          </div>
 
-        <div className="mt-5 flex gap-1 rounded-xl border border-white/10 bg-[#141414] p-1">
-          <button
-            type="button"
-            onClick={() => selectMode("guest")}
-            className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${
-              mode === "guest"
-                ? "bg-white/[0.09] text-white"
-                : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200"
-            }`}
-          >
-            <LogIn className="h-4 w-4" />
-            Join as guest
-          </button>
-          <button
-            type="button"
-            onClick={() => selectMode("register")}
-            className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${
-              mode === "register"
-                ? "bg-white/[0.09] text-white"
-                : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200"
-            }`}
-          >
-            <UserPlus className="h-4 w-4" />
-            Register
-          </button>
-        </div>
+          <h2 className="text-sm font-semibold text-zinc-100">
+            Enter as Guest
+          </h2>
 
-        <form
-          onSubmit={submit}
-          className="mt-3 rounded-2xl border border-white/10 bg-[#141414] p-4"
-        >
-          {mode === "register" ? (
+          <form onSubmit={submitGuest} className="mt-3">
             <label className="block">
               <span className="text-xs font-medium text-zinc-400">
-                Username
+                Display name{" "}
+                <span className="font-normal text-zinc-600">(optional)</span>
               </span>
               <input
-                value={username}
-                onChange={(event) => {
-                  setUsername(event.currentTarget.value);
-                  setLocalError(null);
-                }}
+                value={displayName}
+                onChange={(event) => setDisplayName(event.currentTarget.value)}
                 maxLength={64}
-                placeholder="Pick a unique username"
+                placeholder="How the room sees you"
+                autoComplete="nickname"
                 className={`mt-1.5 ${joinInputClass}`}
               />
             </label>
-          ) : null}
 
-          <label className={`block ${mode === "register" ? "mt-3" : ""}`}>
-            <span className="text-xs font-medium text-zinc-400">
-              Display name (optional)
-            </span>
-            <input
-              value={displayName}
-              onChange={(event) => setDisplayName(event.currentTarget.value)}
-              maxLength={64}
-              placeholder="How the room sees you"
-              className={`mt-1.5 ${joinInputClass}`}
-            />
-          </label>
-
-          {errorText !== null ? (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-300">
-              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
-              <span>{errorText}</span>
+            <div className="mt-3 flex items-start gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setAccepted((value) => !value);
+                  setLocalError(null);
+                }}
+                aria-pressed={accepted}
+                className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                  accepted
+                    ? "border-white bg-white text-black"
+                    : "border-zinc-600 text-transparent hover:border-zinc-400"
+                }`}
+                aria-label="Accept the Participation Policy"
+              >
+                <Check className="h-3 w-3" />
+              </button>
+              <span className="text-[13px] leading-5 text-zinc-400">
+                I accept the{" "}
+                <button
+                  type="button"
+                  onClick={openPolicy}
+                  className="font-medium text-zinc-200 underline decoration-zinc-600 underline-offset-2 transition-colors hover:text-white hover:decoration-zinc-400"
+                >
+                  Participation Policy
+                </button>
+              </span>
             </div>
-          ) : null}
 
-          <button
-            type="submit"
-            disabled={joinPending || policy === undefined}
-            className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#141414] disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
-          >
-            {mode === "guest" ? (
-              <LogIn className="h-4 w-4" />
-            ) : (
-              <UserPlus className="h-4 w-4" />
-            )}
-            {joinPending
-              ? "Joining..."
-              : mode === "guest"
-                ? "Join as guest"
-                : "Register and join"}
-          </button>
-        </form>
+            {guestError !== null ? (
+              <div className="mt-3 flex items-start gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-300">
+                <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
+                <span>{guestError}</span>
+              </div>
+            ) : null}
+
+            <button
+              type="submit"
+              disabled={joinPending}
+              className="mt-4 flex h-11 w-full items-center justify-center rounded-md border border-white/15 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:text-zinc-600"
+            >
+              {joinPending ? "Entering..." : "Enter Chatroom"}
+            </button>
+          </form>
+        </div>
+
+        <p className="mt-6 text-center text-[11px] leading-5 text-zinc-400">
+          Humans come and go; the bots live here. Mod bots watch the room and
+          learn to moderate from everything that happens.
+        </p>
       </div>
     </section>
   );
 }
 
+
 function App() {
   const {
     actors,
+    adoptBrowserLogin,
     apiHealth,
     desktopSession,
+    enterRoom,
     events,
     hasIdentity,
     join,
     localActor,
     onlineActorIds,
     overview,
-    policy,
     realtimeStatus,
     rules,
     refresh,
@@ -843,6 +928,12 @@ function App() {
   const [replyTarget, setReplyTarget] = useState<RoomEvent | null>(null);
   const [openMenu, setOpenMenu] = useState<MenuId | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // Entering the room is an explicit act every launch: nothing inside the
+  // room renders until the person signs in, registers, or walks in as a
+  // guest from the start screen.
+  const [entered, setEntered] = useState(false);
+  const presenceJoinedAs = useRef<string | null>(null);
   const conversationViewport = useRef<HTMLDivElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const apiConnected = apiHealth.data?.status === "ok";
@@ -1062,16 +1153,9 @@ function App() {
           title: "Invites are not connected yet",
         },
         {
-          label: "Leave room",
-          disabled: true,
-          title: "Leaving the room is not connected yet",
-        },
-        {
-          label: "Sign out",
+          label: "Log out",
           disabled: !hasIdentity,
-          title: hasIdentity
-            ? undefined
-            : "Join the room before signing out",
+          title: hasIdentity ? undefined : "You are not logged in yet",
           onSelect: () => void signOut(),
         },
       ],
@@ -1113,12 +1197,48 @@ function App() {
         setOpenMenu(null);
         setAboutOpen(false);
         setReplyTarget(null);
+        setUserMenuOpen(false);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  // Signing out (or a stale identity being dropped) closes the door again.
+  useEffect(() => {
+    if (!hasIdentity) {
+      setEntered(false);
+      presenceJoinedAs.current = null;
+    }
+  }, [hasIdentity]);
+
+  // No stored identity is ever presented at the door: offering someone
+  // else's account for one-click entry is an account takeover on a shared
+  // machine, and a returning guest is a new actor by design. Every launch
+  // starts signed out; remembered sign-in arrives with the browser
+  // hand-off, where the account site's own session does the remembering.
+  const droppedStaleIdentity = useRef(false);
+
+  useEffect(() => {
+    if (!entered && !droppedStaleIdentity.current && localActor !== undefined) {
+      droppedStaleIdentity.current = true;
+      void signOut();
+    }
+  }, [entered, localActor, signOut]);
+
+  // Presence joins once per identity after the person chooses to enter,
+  // whether they continued a stored session or just joined fresh.
+  useEffect(() => {
+    if (
+      entered &&
+      localActor !== undefined &&
+      presenceJoinedAs.current !== localActor.id
+    ) {
+      presenceJoinedAs.current = localActor.id;
+      void enterRoom();
+    }
+  }, [entered, localActor, enterRoom]);
 
   const submitMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1157,6 +1277,13 @@ function App() {
   return (
     <main className="flex h-screen min-w-[880px] flex-col overflow-hidden bg-[#0b0b0b] text-zinc-100">
       <MenuBar menus={menus} openMenu={openMenu} onOpenMenu={setOpenMenu} />
+      {userMenuOpen ? (
+        <div
+          className="fixed inset-0 z-20"
+          onClick={() => setUserMenuOpen(false)}
+          aria-hidden="true"
+        />
+      ) : null}
       {openMenu !== null ? (
         <div
           className="fixed inset-0 z-20"
@@ -1166,6 +1293,20 @@ function App() {
       ) : null}
 
       <div className="flex min-h-0 flex-1">
+        {!entered ? (
+          <StartScreen
+            joinPending={join.isPending}
+            joinError={join.error}
+            onJoin={(request) =>
+              join.mutate(request, { onSuccess: () => setEntered(true) })
+            }
+            onSignedIn={(outcome) => {
+              adoptBrowserLogin(outcome);
+              setEntered(true);
+            }}
+          />
+        ) : (
+          <>
         {membersOpen ? (
           <aside className="flex w-[260px] shrink-0 flex-col border-r border-white/[0.08] bg-[#0d0d0d]">
             <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.08] px-5">
@@ -1198,21 +1339,116 @@ function App() {
                 ))}
               </div>
             </div>
-            <div className="shrink-0 border-t border-white/[0.08] p-3">
-              <div className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
+            <div className="relative shrink-0 border-t border-white/[0.08] p-3">
+              {userMenuOpen && localActor !== undefined ? (
+                <div
+                  className="absolute bottom-full left-3 right-3 z-30 mb-2 overflow-hidden rounded-lg border border-white/10 bg-[#181818] shadow-[0_16px_50px_rgba(0,0,0,0.5)]"
+                  role="menu"
+                  aria-label="Your account"
+                >
+                  <div className="flex items-center gap-3 border-b border-white/[0.08] bg-white/[0.02] px-3 py-3">
+                    <ActorAvatar
+                      actor={localActor}
+                      actorId={localActor.id}
+                      name={localActor.display}
+                    />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-zinc-100">
+                        {localActor.display}
+                      </p>
+                      <p className="truncate text-[11px] text-zinc-500">
+                        {localActor.registered
+                          ? `Registered · @${localActor.handle ?? ""}`
+                          : "Guest · this identity ends when you leave"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-2">
+                    {localActor.registered ? (
+                      <p className="flex items-center gap-2.5 px-1 py-1 text-[12px] text-zinc-400">
+                        <CalendarDays className="h-4 w-4 shrink-0 text-zinc-500" />
+                        Member since {memberSince(localActor.createdAt)}
+                      </p>
+                    ) : (
+                      <p className="flex items-center gap-2.5 px-1 py-1 text-[12px] text-zinc-400">
+                        <DoorOpen className="h-4 w-4 shrink-0 text-zinc-500" />
+                        Walked in {memberSince(localActor.createdAt)}
+                      </p>
+                    )}
+                    <p className="flex items-center gap-2.5 px-1 py-1 text-[12px] text-zinc-400">
+                      {isMuted ? (
+                        <>
+                          <MicOff className="h-4 w-4 shrink-0 text-zinc-500" />
+                          Muted by moderation
+                        </>
+                      ) : (
+                        <>
+                          <Shield className="h-4 w-4 shrink-0 text-zinc-500" />
+                          In good standing
+                        </>
+                      )}
+                    </p>
+                  </div>
+                  <div className="mx-3 h-px bg-white/[0.08]" />
+                  <div className="p-1.5">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setUserMenuOpen(false);
+                        void signOut();
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-zinc-300 transition-colors hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                    >
+                      <LogOut className="h-4 w-4 text-zinc-500" />
+                      Log out
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              <button
+                type="button"
+                onClick={() =>
+                  localActor === undefined
+                    ? undefined
+                    : setUserMenuOpen((open) => !open)
+                }
+                disabled={localActor === undefined}
+                aria-haspopup="menu"
+                aria-expanded={userMenuOpen}
+                className={`flex w-full items-center gap-2.5 rounded-lg border py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-default ${
+                  userMenuOpen
+                    ? "border-white/10 bg-white/[0.06]"
+                    : "border-white/[0.06] bg-white/[0.02] hover:border-white/10 hover:bg-white/[0.04]"
+                }`}
+              >
                 <ActorAvatar
                   actor={localActor}
                   actorId={localActor?.id ?? null}
                   name={localActor?.display ?? "You"}
                   size="sm"
                 />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-zinc-200">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] font-semibold leading-5 text-zinc-100">
                     {localActor?.display ??
                       (hasIdentity ? "Preparing session..." : "Not joined")}
-                  </p>
-                </div>
-              </div>
+                  </span>
+                  {localActor !== undefined ? (
+                    <span className="block truncate text-[11px] leading-4 text-zinc-500">
+                      {localActor.registered
+                        ? `Registered · @${localActor.handle ?? ""}`
+                        : "Guest"}
+                    </span>
+                  ) : null}
+                </span>
+                {localActor !== undefined ? (
+                  <ChevronDown
+                    className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200 ${
+                      userMenuOpen ? "rotate-180" : ""
+                    }`}
+                  />
+                ) : null}
+              </button>
             </div>
           </aside>
         ) : null}
@@ -1262,17 +1498,6 @@ function App() {
           ) : null}
 
           <div className="relative flex min-h-0 flex-1">
-            {!hasIdentity ? (
-              <JoinPanel
-                policy={policy.data}
-                policyLoading={policy.isLoading}
-                policyError={policy.error}
-                joinPending={join.isPending}
-                joinError={join.error}
-                onRetryPolicy={() => void policy.refetch()}
-                onJoin={(request) => join.mutate(request)}
-              />
-            ) : (
             <section className="flex min-w-0 flex-1 flex-col">
               <div
                 ref={conversationViewport}
@@ -1474,7 +1699,6 @@ function App() {
                 </form>
               </div>
             </section>
-            )}
 
           </div>
         </div>
@@ -1592,16 +1816,20 @@ function App() {
             </div>
           </aside>
         ) : null}
+          </>
+        )}
       </div>
 
-      <StatusBar
-        connectionLabel={connectionLabel}
-        sending={sendMessage.isPending}
-        muted={isMuted}
-        searchMatches={
-          searchQuery.trim().length > 0 ? roomEvents.length : null
-        }
-      />
+      {entered ? (
+        <StatusBar
+          connectionLabel={connectionLabel}
+          sending={sendMessage.isPending}
+          muted={isMuted}
+          searchMatches={
+            searchQuery.trim().length > 0 ? roomEvents.length : null
+          }
+        />
+      ) : null}
 
       {aboutOpen ? (
         <div
