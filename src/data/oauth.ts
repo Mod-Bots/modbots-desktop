@@ -56,6 +56,8 @@ export interface BrowserLoginSession {
   completeWithCode: (code: string) => Promise<BrowserLoginOutcome>;
 }
 
+const recoveryCodePrefix = "MBR-";
+
 const exchangeCode = async (
   code: string,
   verifier: string,
@@ -86,6 +88,31 @@ const exchangeCode = async (
   }
 
   return exchangeAccountToken(tokens.access_token);
+};
+
+const exchangeRecoveryCode = async (
+  code: string,
+): Promise<BrowserLoginOutcome> => {
+  const response = await fetchRequest(
+    new URL("/login/recovery/redeem", accountBaseUrl).toString(),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("The recovery code was not accepted. Please try again.");
+  }
+
+  const payload = (await response.json()) as { accessToken?: string };
+
+  if (typeof payload.accessToken !== "string") {
+    throw new Error("The account service returned no usable recovery token.");
+  }
+
+  return exchangeAccountToken(payload.accessToken);
 };
 
 // Prepares the login: builds the authorization URL and arms the loopback
@@ -132,7 +159,13 @@ const prepareBrowserLogin = async (): Promise<BrowserLoginSession> => {
   return {
     authorizeUrl,
     automatic,
-    completeWithCode: (code: string) => exchangeCode(code.trim(), verifier),
+    completeWithCode: (code: string) => {
+      const normalized = code.trim();
+
+      return normalized.toUpperCase().startsWith(recoveryCodePrefix)
+        ? exchangeRecoveryCode(normalized)
+        : exchangeCode(normalized, verifier);
+    },
   };
 };
 
@@ -141,11 +174,18 @@ export const openInBrowser = (url: string): Promise<void> =>
     window.open(url, "_blank");
   });
 
+export const resetBrowserLoginSession = async (): Promise<void> => {
+  try {
+    await invoke("cancel_login_callback");
+  } finally {
+    liveSession = null;
+  }
+};
+
 // One live login session at a time: the loopback listener accepts a single
 // request, so the session (URL, verifier, state, listener) is shared until
-// its automatic return settles, then the next request starts fresh. This
-// also keeps React StrictMode's double-mounted effects from binding the
-// callback port twice.
+// its automatic return settles or is explicitly canceled, then the next
+// request starts fresh.
 let liveSession: Promise<BrowserLoginSession> | null = null;
 
 export const getBrowserLoginSession = (): Promise<BrowserLoginSession> => {

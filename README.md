@@ -1,5 +1,7 @@
 # Mod Bots Desktop
 
+![The Mod Bots desktop app waiting for a Browser log-in](assets/waiting-for-browser.png)
+
 The primary desktop client for Mod Bots. It is built with Tauri 2, Rust,
 React, TypeScript, Vite, and TanStack Query.
 

@@ -1,5 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import type {
+  FormEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+} from "react";
 import startScreenBg from "./assets/start-screen-bg.png";
 import {
   ArrowRight,
@@ -27,29 +31,36 @@ import {
   X,
 } from "lucide-react";
 import type { Actor, ActorType, RoomEvent } from "./data/contracts";
-import { getBrowserLoginSession, openInBrowser } from "./data/oauth";
+import {
+  getBrowserLoginSession,
+  openInBrowser,
+  resetBrowserLoginSession,
+} from "./data/oauth";
 import type {
   BrowserLoginOutcome,
   BrowserLoginSession,
 } from "./data/oauth";
-import { isMutedError, PlatformRequestError } from "./data/platform";
+import { isMutedError } from "./data/platform";
 import { actorLabel } from "./data/room-state";
 import { useRoomActivity } from "./hooks/useRoomActivity";
-import type { JoinRequest } from "./hooks/useRoomActivity";
 import "./App.css";
 
 const roomId = "global-lobby";
 const roomName = "Room";
-// The policy is read on the account site, never rendered in the app.
-const accountUrl =
-  import.meta.env.VITE_MODBOTS_ACCOUNT_URL ?? "http://localhost:3003";
-const policyUrl = `${accountUrl}/policy`;
 const roomAbout =
   "A live chatroom where humans and chat bots talk, and mod bots learn " +
   "to moderate from everything that happens.";
 const appVersion = "0.0.1-alpha";
 
 const groupWindowMs = 5 * 60 * 1000;
+const browserLoginWaitMs = 90_000;
+
+const participantsPanel = { min: 200, max: 360, initial: 260 };
+const aboutPanel = { min: 230, max: 400, initial: 280 };
+const panelResizeStep = 16;
+
+const clampWidth = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, value));
 
 const avatarShades = [
   "#202020",
@@ -104,6 +115,14 @@ const memberSince = (value: string): string =>
     year: "numeric",
   }).format(new Date(value));
 
+const dateTimeLabel = (value: string): string =>
+  new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+
 const startOfDay = (date: Date): number =>
   new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 
@@ -126,6 +145,40 @@ const dayLabel = (date: Date): string => {
 };
 
 const formatRole = (actor: Actor): string => actor.type.replace("_", " ");
+
+const isVisibleParticipant = (actor: Actor): boolean =>
+  actor.type !== "human" || actor.policyAcceptedAt !== null;
+
+type ActivityScope = "7d" | "30d" | "all";
+
+const activityScopes: Array<{ id: ActivityScope; label: string }> = [
+  { id: "7d", label: "7d" },
+  { id: "30d", label: "30d" },
+  { id: "all", label: "All" },
+];
+
+const moderationActionLabels: Record<string, string> = {
+  delete_message: "Messages deleted",
+  mute_actor: "Participants muted",
+  unmute_actor: "Participants unmuted",
+  remove_actor: "Participants removed",
+};
+
+const actorTypeRowLabels: Record<ActorType | "unknown", string> = {
+  human: "Humans",
+  chat_bot: "Chat bots",
+  mod_bot: "Mod bots",
+  unknown: "Others",
+};
+
+const shortDate = (ms: number): string =>
+  new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(new Date(ms));
+
+const bucketShade = (count: number, max: number): string =>
+  `rgba(255, 255, 255, ${count === 0 ? 0.04 : 0.1 + 0.6 * (count / max)})`;
 
 const monogram = (name: string): string => {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -251,6 +304,115 @@ interface MenuSpec {
   items: MenuItemSpec[];
 }
 
+// Panel widths survive restarts the way the window's own frame does:
+// window-state remembers the frame, this remembers the panels.
+const usePanelWidth = (
+  storageKey: string,
+  limits: { min: number; max: number; initial: number },
+): [number, (width: number) => void] => {
+  const [width, setWidth] = useState(() => {
+    const stored = Number(window.localStorage.getItem(storageKey));
+
+    return Number.isFinite(stored) && stored > 0
+      ? clampWidth(stored, limits.min, limits.max)
+      : limits.initial;
+  });
+
+  const update = (next: number) => {
+    const clamped = clampWidth(next, limits.min, limits.max);
+    setWidth(clamped);
+    window.localStorage.setItem(storageKey, String(Math.round(clamped)));
+  };
+
+  return [width, update];
+};
+
+// The draggable seam between a side panel and the conversation. The visible
+// line stays hairline-thin; the hit area straddles the panel border so it is
+// easy to grab. grow says which pointer direction widens the panel.
+function PanelResizeHandle({
+  label,
+  width,
+  limits,
+  onWidthChange,
+  grow,
+}: {
+  label: string;
+  width: number;
+  limits: { min: number; max: number; initial: number };
+  onWidthChange: (width: number) => void;
+  grow: 1 | -1;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const drag = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (drag.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    drag.current = null;
+    setDragging(false);
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuemin={limits.min}
+      aria-valuemax={limits.max}
+      aria-valuenow={Math.round(width)}
+      tabIndex={0}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        drag.current = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startWidth: width,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setDragging(true);
+      }}
+      onPointerMove={(event) => {
+        if (drag.current?.pointerId === event.pointerId) {
+          onWidthChange(
+            drag.current.startWidth +
+              grow * (event.clientX - drag.current.startX),
+          );
+        }
+      }}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          event.preventDefault();
+          const direction = event.key === "ArrowRight" ? 1 : -1;
+          onWidthChange(width + grow * direction * panelResizeStep);
+        }
+      }}
+      className="group relative z-10 -mx-1 w-2 shrink-0 cursor-col-resize touch-none focus-visible:outline-none"
+    >
+      <span
+        aria-hidden="true"
+        className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
+          dragging
+            ? "bg-white/40"
+            : "bg-transparent group-hover:bg-white/25 group-focus-visible:bg-white/40"
+        }`}
+      />
+    </div>
+  );
+}
+
 function ActorAvatar({
   actor,
   actorId,
@@ -260,15 +422,19 @@ function ActorAvatar({
   actor: Actor | undefined;
   actorId: string | null;
   name: string;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
 }) {
   const dimensions =
-    size === "sm" ? "h-8 w-8 text-[11px]" : "h-10 w-10 text-xs";
+    size === "sm"
+      ? "h-8 w-8 rounded-xl text-[11px]"
+      : size === "lg"
+        ? "h-16 w-16 rounded-2xl text-lg"
+        : "h-10 w-10 rounded-xl text-xs";
 
   return (
     <div className="relative shrink-0">
       <div
-        className={`flex ${dimensions} items-center justify-center rounded-xl border border-white/10 font-semibold text-zinc-100`}
+        className={`flex ${dimensions} items-center justify-center border border-white/10 font-semibold text-zinc-100`}
         style={{ backgroundColor: shadeFor(actorId) }}
       >
         {monogram(name)}
@@ -556,6 +722,59 @@ function ModerationEvent({
   );
 }
 
+// One row of the Activity card: the headline number is always visible, the
+// breakdown sits behind the same expand grammar the Rules list uses.
+function ActivitySection({
+  label,
+  value,
+  open,
+  onToggle,
+  children,
+}: {
+  label: string;
+  value: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border-t border-white/[0.06]">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded-md px-1 py-2 text-left hover:bg-white/[0.03]"
+      >
+        <span className="flex-1 text-[12px] font-medium text-zinc-400">
+          {label}
+        </span>
+        <span className="text-[13px] font-semibold tabular-nums text-zinc-100">
+          {value}
+        </span>
+        <ChevronDown
+          className={`h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+      {open ? <div className="space-y-1.5 px-1 pb-2.5">{children}</div> : null}
+    </div>
+  );
+}
+
+function ActivityCountRow({ label, count }: { label: string; count: number }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="min-w-0 flex-1 truncate text-[11px] text-zinc-500">
+        {label}
+      </span>
+      <span className="text-[11px] tabular-nums text-zinc-300">
+        {count.toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
 function ParticipantRow({ actor }: { actor: Actor }) {
   return (
     <div className="flex items-center gap-3 rounded-xl px-2 py-1.5 hover:bg-white/[0.04]">
@@ -578,145 +797,252 @@ function ParticipantRow({ actor }: { actor: Actor }) {
   );
 }
 
-const joinErrorText = (error: unknown): string => {
-  if (error instanceof PlatformRequestError) {
-    if (error.code === "username_taken") {
-      return "That username is already taken. Pick a different one.";
-    }
+function ProfileStat({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/[0.08] bg-black/20 px-3 py-3">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
+        {label}
+      </p>
+      <p className="mt-1 text-[15px] font-semibold text-zinc-100">{value}</p>
+    </div>
+  );
+}
 
-    if (error.code === "policy_not_accepted") {
-      return "You must accept the Participation Policy before joining.";
-    }
-  }
-
-  return error instanceof Error ? error.message : "Joining failed. Try again.";
-};
-
-const joinInputClass =
-  "h-10 w-full rounded-md border border-white/10 bg-[#181818] px-3 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-white/25";
+function ProfileDetailRow({
+  icon,
+  label,
+  value,
+  subtle = false,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  subtle?: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-xl px-1 py-1.5">
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-400">
+        {icon}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
+          {label}
+        </p>
+        <p
+          className={`mt-0.5 text-[13px] leading-5 ${
+            subtle ? "text-zinc-400" : "text-zinc-200"
+          }`}
+        >
+          {value}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function StartScreen({
-  joinPending,
-  joinError,
-  onJoin,
   onSignedIn,
 }: {
-  joinPending: boolean;
-  joinError: Error | null;
-  onJoin: (request: JoinRequest) => void;
   onSignedIn: (outcome: BrowserLoginOutcome) => void;
 }) {
   const [session, setSession] = useState<BrowserLoginSession | null>(null);
-  const [waitingForBrowser, setWaitingForBrowser] = useState(false);
+  const [loginUrl, setLoginUrl] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState("");
   const [codePending, setCodePending] = useState(false);
+  const [preparingSession, setPreparingSession] = useState(false);
+  const [waitingForBrowser, setWaitingForBrowser] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [displayName, setDisplayName] = useState("");
-  const [accepted, setAccepted] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
-  const guestError =
-    localError ?? (joinError !== null ? joinErrorText(joinError) : null);
+  const boundBrowserSession = useRef<BrowserLoginSession | null>(null);
 
-  // The sign-in address exists as soon as the screen does: the loopback
-  // listener arms immediately, so the URL works whether the person clicks
-  // Continue in browser or copies it into a browser of their choosing.
+  const loginFailureMessage = (error: unknown, fallback: string): string => {
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return typeof error === "string" && error.trim().length > 0
+      ? error
+      : fallback;
+  };
+
+  const bindBrowserSession = (prepared: BrowserLoginSession) => {
+    setSession(prepared);
+    setLoginUrl(prepared.authorizeUrl);
+
+    if (boundBrowserSession.current === prepared) {
+      return prepared;
+    }
+
+    boundBrowserSession.current = prepared;
+    prepared.automatic.then(
+      (outcome) => {
+        if (boundBrowserSession.current === prepared) {
+          onSignedIn(outcome);
+        }
+      },
+      (error: unknown) => {
+        if (boundBrowserSession.current !== prepared) {
+          return;
+        }
+
+        boundBrowserSession.current = null;
+        setSession((current) => (current === prepared ? null : current));
+        setWaitingForBrowser(false);
+        setLoginError(loginFailureMessage(
+          error,
+          "The Browser log-in did not complete.",
+        ),
+        );
+      },
+    );
+
+    return prepared;
+  };
+
+  const ensureBrowserSession = async (): Promise<BrowserLoginSession> => {
+    if (session !== null) {
+      return session;
+    }
+
+    setPreparingSession(true);
+
+    try {
+      return bindBrowserSession(await getBrowserLoginSession());
+    } finally {
+      setPreparingSession(false);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
 
-    void getBrowserLoginSession().then((prepared) => {
-      if (cancelled) {
-        return;
-      }
+    setPreparingSession(true);
 
-      setSession(prepared);
-      prepared.automatic.then(
-        (outcome) => {
-          if (!cancelled) {
-            onSignedIn(outcome);
-          }
-        },
-        (error: unknown) => {
-          if (!cancelled) {
-            setWaitingForBrowser(false);
-            setLoginError(
-              error instanceof Error
-                ? error.message
-                : "The Browser log-in did not complete.",
-            );
-          }
-        },
-      );
-    });
+    void getBrowserLoginSession()
+      .then((prepared) => {
+        if (cancelled) {
+          return;
+        }
+
+        bindBrowserSession(prepared);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+
+        setLoginError(loginFailureMessage(
+          error,
+          "The log-in link could not be prepared.",
+        ),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setPreparingSession(false);
+        }
+      });
 
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const copyLoginUrl = () => {
-    if (session === null) {
-      return;
+  const resetLoginFlow = useEffectEvent(async (message: string | null) => {
+    boundBrowserSession.current = null;
+    setAuthCode("");
+    setCodePending(false);
+    setPreparingSession(false);
+    setWaitingForBrowser(false);
+    setCopied(false);
+    setSession(null);
+    setLoginUrl(null);
+
+    await resetBrowserLoginSession();
+    setLoginError(message);
+  });
+
+  useEffect(() => {
+    if (!waitingForBrowser || loginError !== null) {
+      return undefined;
     }
 
-    void navigator.clipboard.writeText(session.authorizeUrl).then(() => {
+    const timeoutId = window.setTimeout(() => {
+      void resetLoginFlow(
+        "The Browser log-in took too long and was reset. Start again when you are ready.",
+      );
+    }, browserLoginWaitMs);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [loginError, resetLoginFlow, waitingForBrowser]);
+
+  const copyLoginUrl = async () => {
+    setLoginError(null);
+
+    try {
+      const url = loginUrl ?? (await ensureBrowserSession()).authorizeUrl;
+      await navigator.clipboard.writeText(url);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1_500);
-    });
+    } catch (error) {
+      setLoginError(loginFailureMessage(
+        error,
+        "The log-in link could not be prepared.",
+      ),
+      );
+    }
   };
 
-  const continueInBrowser = () => {
-    if (session === null) {
-      return;
-    }
-
+  const continueInBrowser = async () => {
     setLoginError(null);
     setWaitingForBrowser(true);
-    void openInBrowser(session.authorizeUrl);
+
+    try {
+      const prepared = await ensureBrowserSession();
+      await openInBrowser(prepared.authorizeUrl);
+    } catch (error) {
+      setWaitingForBrowser(false);
+      setLoginError(loginFailureMessage(
+        error,
+        "The Browser log-in could not be started.",
+      ),
+      );
+    }
   };
 
-  const submitCode = (event: FormEvent<HTMLFormElement>) => {
+  const submitCode = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (session === null || codePending || authCode.trim().length === 0) {
+    if (codePending || authCode.trim().length === 0) {
       return;
     }
 
     setLoginError(null);
     setCodePending(true);
-    session.completeWithCode(authCode).then(
-      (outcome) => onSignedIn(outcome),
-      (error: unknown) => {
-        setCodePending(false);
-        setLoginError(
-          error instanceof Error
-            ? error.message
-            : "The authorization code was not accepted.",
-        );
-      },
-    );
-  };
 
-  const submitGuest = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    if (joinPending) {
-      return;
+    try {
+      const prepared = await ensureBrowserSession();
+      const outcome = await prepared.completeWithCode(authCode);
+      onSignedIn(outcome);
+    } catch (error) {
+      setLoginError(loginFailureMessage(
+        error,
+        "The authorization code was not accepted.",
+      ),
+      );
+    } finally {
+      setCodePending(false);
     }
-
-    if (!accepted) {
-      setLocalError("You must accept the Participation Policy to enter.");
-      return;
-    }
-
-    setLocalError(null);
-    onJoin({ displayName, acceptPolicy: accepted });
   };
 
-  const openPolicy = () => {
-    void openInBrowser(policyUrl);
-  };
 
   return (
     <section className="modbots-scroll relative flex min-h-0 flex-1 overflow-y-auto">
@@ -755,12 +1081,14 @@ function StartScreen({
 
           <div className="mt-3 flex items-center gap-1.5 rounded-md border border-white/10 bg-[#0f0f0f] py-1.5 pl-3 pr-1.5">
             <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-400">
-              {session?.authorizeUrl ?? "Preparing your log-in link..."}
+              {loginUrl ?? "Preparing your log-in link..."}
             </span>
             <button
               type="button"
-              onClick={copyLoginUrl}
-              disabled={session === null}
+              onClick={() => {
+                void copyLoginUrl();
+              }}
+              disabled={preparingSession && loginUrl === null}
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-not-allowed"
               aria-label="Copy the log-in link"
               title="Copy"
@@ -773,7 +1101,15 @@ function StartScreen({
             </button>
           </div>
 
-          <form onSubmit={submitCode} className="mt-3">
+          <div className="my-3 flex items-center gap-3">
+            <span className="h-px flex-1 bg-white/[0.08]" />
+            <span className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-600">
+              or
+            </span>
+            <span className="h-px flex-1 bg-white/[0.08]" />
+          </div>
+
+          <form onSubmit={submitCode} autoComplete="off">
             <div className="flex items-center gap-1.5 rounded-md border border-white/10 bg-[#0f0f0f] py-1.5 pl-3 pr-1.5 focus-within:border-white/25">
               <input
                 value={authCode}
@@ -785,7 +1121,7 @@ function StartScreen({
               />
               <button
                 type="submit"
-                disabled={authCode.trim().length === 0 || codePending}
+                disabled={authCode.trim().length === 0 || codePending || preparingSession}
                 className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-zinc-500"
                 aria-label="Log in with the authorization code"
                 title="Log in with this code"
@@ -805,94 +1141,25 @@ function StartScreen({
           <button
             type="button"
             onClick={continueInBrowser}
-            disabled={session === null || codePending}
+            disabled={preparingSession || codePending}
             className="mt-4 flex h-11 w-full items-center justify-center rounded-md bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#141414] disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
           >
-            {waitingForBrowser ? "Waiting for your Browser..." : "Continue in Browser"}
+            {preparingSession
+              ? "Preparing Browser Login..."
+              : waitingForBrowser
+                ? "Waiting for your Browser..."
+                : "Continue in Browser"}
           </button>
           {waitingForBrowser && loginError === null ? (
             <p className="mt-2 text-center text-[11px] leading-5 text-zinc-500">
               Nothing happening? Click again to reopen your Browser.
             </p>
           ) : null}
-
-          <div className="my-5 flex items-center gap-3">
-            <span className="h-px flex-1 bg-white/[0.08]" />
-            <span className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-600">
-              or
-            </span>
-            <span className="h-px flex-1 bg-white/[0.08]" />
-          </div>
-
-          <h2 className="text-sm font-semibold text-zinc-100">
-            Enter as Guest
-          </h2>
-
-          <form onSubmit={submitGuest} className="mt-3">
-            <label className="block">
-              <span className="text-xs font-medium text-zinc-400">
-                Display name{" "}
-                <span className="font-normal text-zinc-600">(optional)</span>
-              </span>
-              <input
-                value={displayName}
-                onChange={(event) => setDisplayName(event.currentTarget.value)}
-                maxLength={64}
-                placeholder="How the room sees you"
-                autoComplete="nickname"
-                className={`mt-1.5 ${joinInputClass}`}
-              />
-            </label>
-
-            <div className="mt-3 flex items-start gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setAccepted((value) => !value);
-                  setLocalError(null);
-                }}
-                aria-pressed={accepted}
-                className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
-                  accepted
-                    ? "border-white bg-white text-black"
-                    : "border-zinc-600 text-transparent hover:border-zinc-400"
-                }`}
-                aria-label="Accept the Participation Policy"
-              >
-                <Check className="h-3 w-3" />
-              </button>
-              <span className="text-[13px] leading-5 text-zinc-400">
-                I accept the{" "}
-                <button
-                  type="button"
-                  onClick={openPolicy}
-                  className="font-medium text-zinc-200 underline decoration-zinc-600 underline-offset-2 transition-colors hover:text-white hover:decoration-zinc-400"
-                >
-                  Participation Policy
-                </button>
-              </span>
-            </div>
-
-            {guestError !== null ? (
-              <div className="mt-3 flex items-start gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-300">
-                <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
-                <span>{guestError}</span>
-              </div>
-            ) : null}
-
-            <button
-              type="submit"
-              disabled={joinPending}
-              className="mt-4 flex h-11 w-full items-center justify-center rounded-md border border-white/15 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:text-zinc-600"
-            >
-              {joinPending ? "Entering..." : "Enter Chatroom"}
-            </button>
-          </form>
         </div>
 
         <p className="mt-6 text-center text-[11px] leading-5 text-zinc-400">
-          Humans come and go; the bots live here. Mod bots watch the room and
-          learn to moderate from everything that happens.
+          Humans come and go; the chat bots live here. Mod bots watch the room
+          and learn to moderate from everything that happens.
         </p>
       </div>
     </section>
@@ -909,7 +1176,6 @@ function App() {
     enterRoom,
     events,
     hasIdentity,
-    join,
     localActor,
     onlineActorIds,
     overview,
@@ -923,6 +1189,25 @@ function App() {
   const [mutedNotice, setMutedNotice] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(true);
   const [aboutPanelOpen, setAboutPanelOpen] = useState(true);
+  const [participantsWidth, setParticipantsWidth] = usePanelWidth(
+    "modbots.desktop.participants-panel-width",
+    participantsPanel,
+  );
+  const [aboutWidth, setAboutWidth] = usePanelWidth(
+    "modbots.desktop.about-panel-width",
+    aboutPanel,
+  );
+  const [activityScope, setActivityScope] = useState<ActivityScope>("7d");
+  // Moderation opens by default: what the mod bots did is the one story
+  // only this room can tell.
+  const [openActivity, setOpenActivity] = useState<Record<string, boolean>>({
+    moderation: true,
+  });
+  const toggleActivitySection = (id: string) =>
+    setOpenActivity((previous) => ({
+      ...previous,
+      [id]: !(previous[id] ?? false),
+    }));
   const [openRuleId, setOpenRuleId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [replyTarget, setReplyTarget] = useState<RoomEvent | null>(null);
@@ -930,8 +1215,7 @@ function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Entering the room is an explicit act every launch: nothing inside the
-  // room renders until the person signs in, registers, or walks in as a
-  // guest from the start screen.
+  // room renders until the person finishes the browser-side sign-in flow.
   const [entered, setEntered] = useState(false);
   const presenceJoinedAs = useRef<string | null>(null);
   const conversationViewport = useRef<HTMLDivElement>(null);
@@ -943,12 +1227,15 @@ function App() {
   const modBotCount = onlineActorIds.filter(
     (actorId) => actors.get(actorId)?.type === "mod_bot",
   ).length;
-  const onlineActors = onlineActorIds
+  const visibleOnlineActors = onlineActorIds
     .map((actorId) => actors.get(actorId))
-    .filter((actor): actor is Actor => actor !== undefined);
+    .filter(
+      (actor): actor is Actor =>
+        actor !== undefined && isVisibleParticipant(actor),
+    );
   const roster = roleOrder.map((type) => ({
     type,
-    members: onlineActors.filter((actor) => actor.type === type),
+    members: visibleOnlineActors.filter((actor) => actor.type === type),
   }));
   const roomEvents = useMemo(() => {
     const query = searchQuery.trim().toLocaleLowerCase();
@@ -996,20 +1283,79 @@ function App() {
       new Map((rules.data?.rules ?? []).map((rule) => [rule.id, rule.title])),
     [rules.data],
   );
-  // The room's pulse, computed from the event history: a bar per day for
-  // the last seven days of conversation, plus the week's totals. Shown
-  // nowhere else in the interface.
-  const weekPulse = useMemo(() => {
+  // The room's activity, computed from the full event history the client
+  // already holds (getRoomEvents pages through the entire record). The
+  // scope tabs re-window the same record; nothing here is estimated.
+  const activity = useMemo(() => {
     const dayMs = 86_400_000;
-    const start = startOfDay(new Date()) - 6 * dayMs;
-    const days = Array.from({ length: 7 }, () => 0);
-    let messages = 0;
-    let moderationActions = 0;
+    const weekMs = 7 * dayMs;
+    const source = events.data ?? [];
+    const todayStart = startOfDay(new Date());
+    const firstEventStart =
+      source.length > 0
+        ? startOfDay(new Date(source[0].occurredAt))
+        : todayStart;
+    // "All" buckets by week, anchored so today falls in the last bucket;
+    // the leading partial week folds into the first bucket.
+    const bucketMs = activityScope === "all" ? weekMs : dayMs;
+    const start =
+      activityScope === "7d"
+        ? todayStart - 6 * dayMs
+        : activityScope === "30d"
+          ? todayStart - 29 * dayMs
+          : todayStart -
+            Math.floor((todayStart - firstEventStart) / weekMs) * weekMs;
+    const bucketCount =
+      activityScope === "7d"
+        ? 7
+        : activityScope === "30d"
+          ? 30
+          : Math.floor((todayStart - start) / weekMs) + 1;
+    const weekdayName = new Intl.DateTimeFormat(undefined, {
+      weekday: "long",
+    });
+    const weekdayInitial = new Intl.DateTimeFormat(undefined, {
+      weekday: "narrow",
+    });
+    const buckets = Array.from({ length: bucketCount }, (_, index) => {
+      const at = start + index * bucketMs;
 
-    for (const event of events.data ?? []) {
+      return {
+        key: String(at),
+        count: 0,
+        label:
+          activityScope === "7d"
+            ? weekdayName.format(new Date(at))
+            : activityScope === "30d"
+              ? shortDate(at)
+              : `Week of ${shortDate(at)}`,
+        initial:
+          activityScope === "7d"
+            ? weekdayInitial.format(new Date(at))
+            : null,
+      };
+    });
+    const messagesByType: Record<ActorType | "unknown", number> = {
+      human: 0,
+      chat_bot: 0,
+      mod_bot: 0,
+      unknown: 0,
+    };
+    const talkedByType: Record<ActorType | "unknown", Set<string>> = {
+      human: new Set(),
+      chat_bot: new Set(),
+      mod_bot: new Set(),
+      unknown: new Set(),
+    };
+    const moderationByAction = new Map<string, number>();
+    const messagesByActor = new Map<string, number>();
+    let messages = 0;
+    let moderationTotal = 0;
+
+    for (const event of source) {
       const occurred = new Date(event.occurredAt).getTime();
 
-      if (occurred < start) {
+      if (activityScope !== "all" && occurred < start) {
         continue;
       }
 
@@ -1018,14 +1364,81 @@ function App() {
         event.type === "content_posted"
       ) {
         messages += 1;
-        days[Math.min(6, Math.floor((occurred - start) / dayMs))] += 1;
+        const index = Math.min(
+          bucketCount - 1,
+          Math.max(0, Math.floor((occurred - start) / bucketMs)),
+        );
+        buckets[index].count += 1;
+        const type =
+          event.actorId === null
+            ? "unknown"
+            : (actors.get(event.actorId)?.type ?? "unknown");
+        messagesByType[type] += 1;
+
+        if (event.actorId !== null) {
+          talkedByType[type].add(event.actorId);
+          messagesByActor.set(
+            event.actorId,
+            (messagesByActor.get(event.actorId) ?? 0) + 1,
+          );
+        }
       } else if (event.type === "moderation_action_applied") {
-        moderationActions += 1;
+        moderationTotal += 1;
+        const action = payloadString(event, "action") ?? "other";
+        moderationByAction.set(
+          action,
+          (moderationByAction.get(action) ?? 0) + 1,
+        );
       }
     }
 
-    return { days, messages, moderationActions };
-  }, [events.data]);
+    const typeOrder: Array<ActorType | "unknown"> = [
+      "human",
+      "chat_bot",
+      "mod_bot",
+      "unknown",
+    ];
+    const messageRows = typeOrder
+      .filter((type) => messagesByType[type] > 0)
+      .map((type) => ({
+        label: actorTypeRowLabels[type],
+        count: messagesByType[type],
+      }))
+      .sort((a, b) => b.count - a.count);
+    const talkedRows = typeOrder
+      .filter((type) => talkedByType[type].size > 0)
+      .map((type) => ({
+        label: actorTypeRowLabels[type],
+        count: talkedByType[type].size,
+      }))
+      .sort((a, b) => b.count - a.count);
+    const moderationRows = [...moderationByAction]
+      .map(([action, count]) => ({
+        label: moderationActionLabels[action] ?? action.replace(/_/g, " "),
+        count,
+      }))
+      .sort((a, b) => b.count - a.count);
+    const topPosters = [...messagesByActor]
+      .map(([actorId, count]) => ({ actorId, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    return {
+      buckets,
+      max: Math.max(...buckets.map((bucket) => bucket.count), 1),
+      messages,
+      messageRows,
+      moderationTotal,
+      moderationRows,
+      talkedTotal: talkedRows.reduce((sum, row) => sum + row.count, 0),
+      talkedRows,
+      topPosters,
+      rangeStartLabel:
+        activityScope === "all"
+          ? shortDate(firstEventStart)
+          : shortDate(start),
+    };
+  }, [events.data, actors, activityScope]);
   // Muted state is imperceptible until a send fails, so it is derived from
   // the room's own moderation events for the local actor.
   const isMuted = useMemo(() => {
@@ -1049,6 +1462,60 @@ function App() {
 
     return muted;
   }, [events.data, localActor]);
+  const localProfile = useMemo(() => {
+    if (localActor === undefined) {
+      return null;
+    }
+
+    let messages = 0;
+    let messagesToday = 0;
+    let replies = 0;
+    let lastMessageAt: string | null = null;
+    let joinedAt: string | null = null;
+    const todayStart = startOfDay(new Date());
+
+    for (const event of events.data ?? []) {
+      if (event.actorId !== localActor.id) {
+        continue;
+      }
+
+      if (event.type === "actor_joined") {
+        joinedAt = event.occurredAt;
+      }
+
+      if (
+        event.type !== "message_posted" &&
+        event.type !== "content_posted"
+      ) {
+        continue;
+      }
+
+      messages += 1;
+      lastMessageAt = event.occurredAt;
+
+      if (payloadReply(event) !== null) {
+        replies += 1;
+      }
+
+      if (new Date(event.occurredAt).getTime() >= todayStart) {
+        messagesToday += 1;
+      }
+    }
+
+    return {
+      accountLabel: localActor.registered ? "Registered account" : "Guest session",
+      handleLabel:
+        localActor.registered && localActor.handle !== null
+          ? `@${localActor.handle}`
+          : "This identity ends when you leave",
+      joinedAt,
+      lastMessageAt,
+      messages,
+      messagesToday,
+      replies,
+      online: onlineActorIds.includes(localActor.id),
+    };
+  }, [events.data, localActor, onlineActorIds]);
   const canSend =
     localActor !== undefined &&
     apiConnected &&
@@ -1295,11 +1762,6 @@ function App() {
       <div className="flex min-h-0 flex-1">
         {!entered ? (
           <StartScreen
-            joinPending={join.isPending}
-            joinError={join.error}
-            onJoin={(request) =>
-              join.mutate(request, { onSuccess: () => setEntered(true) })
-            }
             onSignedIn={(outcome) => {
               adoptBrowserLogin(outcome);
               setEntered(true);
@@ -1308,7 +1770,10 @@ function App() {
         ) : (
           <>
         {membersOpen ? (
-          <aside className="flex w-[260px] shrink-0 flex-col border-r border-white/[0.08] bg-[#0d0d0d]">
+          <aside
+            className="flex shrink-0 flex-col border-r border-white/[0.08] bg-[#0d0d0d]"
+            style={{ width: participantsWidth }}
+          >
             <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.08] px-5">
               <h1 className="truncate text-[15px] font-semibold text-white">
                 {roomName}
@@ -1320,7 +1785,7 @@ function App() {
                 Participants
               </span>
               <span className="ml-auto text-xs tabular-nums text-zinc-500">
-                {onlineActors.length}
+                {visibleOnlineActors.length}
               </span>
             </div>
             <div className="modbots-scroll min-h-0 flex-1 overflow-y-auto p-3">
@@ -1340,57 +1805,111 @@ function App() {
               </div>
             </div>
             <div className="relative shrink-0 border-t border-white/[0.08] p-3">
-              {userMenuOpen && localActor !== undefined ? (
+              {userMenuOpen && localActor !== undefined && localProfile !== null ? (
                 <div
-                  className="absolute bottom-full left-3 right-3 z-30 mb-2 overflow-hidden rounded-lg border border-white/10 bg-[#181818] shadow-[0_16px_50px_rgba(0,0,0,0.5)]"
-                  role="menu"
-                  aria-label="Your account"
+                  className="absolute bottom-full left-3 right-3 z-30 mb-2 overflow-hidden rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(28,28,28,0.98),rgba(17,17,17,0.98))] shadow-[0_24px_80px_rgba(0,0,0,0.58)] backdrop-blur-xl"
+                  role="dialog"
+                  aria-label="Your profile"
                 >
-                  <div className="flex items-center gap-3 border-b border-white/[0.08] bg-white/[0.02] px-3 py-3">
-                    <ActorAvatar
-                      actor={localActor}
-                      actorId={localActor.id}
-                      name={localActor.display}
-                    />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-zinc-100">
-                        {localActor.display}
-                      </p>
-                      <p className="truncate text-[11px] text-zinc-500">
-                        {localActor.registered
-                          ? `Registered · @${localActor.handle ?? ""}`
-                          : "Guest · this identity ends when you leave"}
-                      </p>
+                  <div className="border-b border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.08),transparent_45%)] px-4 py-4">
+                    <div className="flex items-start gap-3">
+                      <ActorAvatar
+                        actor={localActor}
+                        actorId={localActor.id}
+                        name={localActor.display}
+                        size="lg"
+                      />
+                      <div className="min-w-0 flex-1 pt-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-[21px] font-semibold leading-6 text-zinc-50">
+                            {localActor.display}
+                          </p>
+                          <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-300">
+                            {localProfile.accountLabel}
+                          </span>
+                        </div>
+                        <p className="mt-1 truncate text-sm text-zinc-400">
+                          {localProfile.handleLabel}
+                        </p>
+                        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-zinc-400">
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-black/20 px-2.5 py-1">
+                            <span
+                              className={`h-2 w-2 rounded-full ${
+                                localProfile.online ? "bg-zinc-200" : "border border-zinc-500"
+                              }`}
+                            />
+                            {localProfile.online ? "In the room" : "Away"}
+                          </span>
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-black/20 px-2.5 py-1">
+                            {isMuted ? (
+                              <MicOff className="h-3 w-3" />
+                            ) : (
+                              <Shield className="h-3 w-3" />
+                            )}
+                            {isMuted ? "Muted" : "Good standing"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                  <div className="px-2.5 py-2">
-                    {localActor.registered ? (
-                      <p className="flex items-center gap-2.5 px-1 py-1 text-[12px] text-zinc-400">
-                        <CalendarDays className="h-4 w-4 shrink-0 text-zinc-500" />
-                        Member since {memberSince(localActor.createdAt)}
-                      </p>
-                    ) : (
-                      <p className="flex items-center gap-2.5 px-1 py-1 text-[12px] text-zinc-400">
-                        <DoorOpen className="h-4 w-4 shrink-0 text-zinc-500" />
-                        Walked in {memberSince(localActor.createdAt)}
-                      </p>
-                    )}
-                    <p className="flex items-center gap-2.5 px-1 py-1 text-[12px] text-zinc-400">
-                      {isMuted ? (
-                        <>
-                          <MicOff className="h-4 w-4 shrink-0 text-zinc-500" />
-                          Muted by moderation
-                        </>
-                      ) : (
-                        <>
-                          <Shield className="h-4 w-4 shrink-0 text-zinc-500" />
-                          In good standing
-                        </>
-                      )}
-                    </p>
+
+                  <div className="grid grid-cols-2 gap-2 border-b border-white/[0.08] px-4 py-3">
+                    <ProfileStat
+                      label="Messages"
+                      value={localProfile.messages.toLocaleString()}
+                    />
+                    <ProfileStat
+                      label="Today"
+                      value={localProfile.messagesToday.toLocaleString()}
+                    />
+                    <ProfileStat
+                      label="Replies"
+                      value={localProfile.replies.toLocaleString()}
+                    />
+                    <ProfileStat
+                      label="Last active"
+                      value={
+                        localProfile.lastMessageAt === null
+                          ? "Listening"
+                          : formatTime(localProfile.lastMessageAt)
+                      }
+                    />
                   </div>
-                  <div className="mx-3 h-px bg-white/[0.08]" />
-                  <div className="p-1.5">
+
+                  <div className="space-y-1 px-4 py-3">
+                    <ProfileDetailRow
+                      icon={<CalendarDays className="h-4 w-4" />}
+                      label={localActor.registered ? "Member since" : "Identity created"}
+                      value={memberSince(localActor.createdAt)}
+                    />
+                    <ProfileDetailRow
+                      icon={<DoorOpen className="h-4 w-4" />}
+                      label="Room entry"
+                      value={
+                        localProfile.joinedAt === null
+                          ? "This session has not entered the room yet"
+                          : `Joined ${dateTimeLabel(localProfile.joinedAt)}`
+                      }
+                      subtle={localProfile.joinedAt === null}
+                    />
+                    <ProfileDetailRow
+                      icon={<MessageSquare className="h-4 w-4" />}
+                      label="Conversation"
+                      value={
+                        localProfile.lastMessageAt === null
+                          ? "No messages sent yet"
+                          : `Last message ${dateTimeLabel(localProfile.lastMessageAt)}`
+                      }
+                      subtle={localProfile.lastMessageAt === null}
+                    />
+                    <ProfileDetailRow
+                      icon={<Users className="h-4 w-4" />}
+                      label="People here now"
+                      value={`${visibleOnlineActors.filter((actor) => actor.type === "human").length} humans, ${chatBotCount} chat bots, ${modBotCount} mod bots`}
+                    />
+                  </div>
+
+                  <div className="border-t border-white/[0.08] px-3 py-3">
                     <button
                       type="button"
                       role="menuitem"
@@ -1398,10 +1917,19 @@ function App() {
                         setUserMenuOpen(false);
                         void signOut();
                       }}
-                      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-zinc-300 transition-colors hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                      className="flex w-full items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3 py-3 text-left text-[13px] text-zinc-300 transition-colors hover:border-white/12 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
                     >
-                      <LogOut className="h-4 w-4 text-zinc-500" />
-                      Log out
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-black/20 text-zinc-400">
+                        <LogOut className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-semibold text-zinc-100">
+                          Log out
+                        </span>
+                        <span className="block text-[11px] text-zinc-500">
+                          Close this identity and return to the room door
+                        </span>
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -1414,43 +1942,72 @@ function App() {
                     : setUserMenuOpen((open) => !open)
                 }
                 disabled={localActor === undefined}
-                aria-haspopup="menu"
+                aria-haspopup="dialog"
                 aria-expanded={userMenuOpen}
-                className={`flex w-full items-center gap-2.5 rounded-lg border py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-default ${
+                className={`group flex w-full items-center gap-3 rounded-[20px] border px-3 py-3 text-left shadow-[0_12px_36px_rgba(0,0,0,0.22)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:cursor-default ${
                   userMenuOpen
-                    ? "border-white/10 bg-white/[0.06]"
-                    : "border-white/[0.06] bg-white/[0.02] hover:border-white/10 hover:bg-white/[0.04]"
+                    ? "border-white/12 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))]"
+                    : "border-white/[0.06] bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] hover:border-white/10 hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03))]"
                 }`}
               >
-                <ActorAvatar
-                  actor={localActor}
-                  actorId={localActor?.id ?? null}
-                  name={localActor?.display ?? "You"}
-                  size="sm"
-                />
+                <div className="relative">
+                  <ActorAvatar
+                    actor={localActor}
+                    actorId={localActor?.id ?? null}
+                    name={localActor?.display ?? "You"}
+                    size="md"
+                  />
+                  {localProfile?.online ? (
+                    <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#0d0d0d] bg-zinc-200" />
+                  ) : null}
+                </div>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-semibold leading-5 text-zinc-100">
-                    {localActor?.display ??
-                      (hasIdentity ? "Preparing session..." : "Not joined")}
+                  <span className="flex items-center gap-2">
+                    <span className="block min-w-0 flex-1 truncate text-[14px] font-semibold leading-5 text-zinc-100">
+                      {localActor?.display ??
+                        (hasIdentity ? "Preparing session..." : "Not joined")}
+                    </span>
+                    {localProfile !== null ? (
+                      <span className="rounded-full border border-white/[0.08] bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
+                        {localActor?.registered ? "Account" : "Guest"}
+                      </span>
+                    ) : null}
                   </span>
-                  {localActor !== undefined ? (
-                    <span className="block truncate text-[11px] leading-4 text-zinc-500">
-                      {localActor.registered
-                        ? `Registered · @${localActor.handle ?? ""}`
-                        : "Guest"}
+                  {localProfile !== null ? (
+                    <span className="mt-1 block truncate text-[12px] leading-5 text-zinc-400">
+                      {localProfile.handleLabel}
+                    </span>
+                  ) : null}
+                  {localProfile !== null ? (
+                    <span className="mt-1 block truncate text-[11px] leading-4 text-zinc-600">
+                      {localProfile.online ? "In the room now" : "Away from the room"}
+                      {localProfile.messages > 0
+                        ? ` · ${localProfile.messages.toLocaleString()} messages`
+                        : " · listening"}
                     </span>
                   ) : null}
                 </span>
                 {localActor !== undefined ? (
-                  <ChevronDown
-                    className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200 ${
-                      userMenuOpen ? "rotate-180" : ""
-                    }`}
-                  />
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-black/20 text-zinc-500 transition-colors group-hover:text-zinc-300">
+                    <ChevronDown
+                      className={`h-4 w-4 transition-transform duration-200 ${
+                        userMenuOpen ? "rotate-180" : ""
+                      }`}
+                    />
+                  </span>
                 ) : null}
               </button>
             </div>
           </aside>
+        ) : null}
+        {membersOpen ? (
+          <PanelResizeHandle
+            label="Resize the participants panel"
+            width={participantsWidth}
+            limits={participantsPanel}
+            onWidthChange={setParticipantsWidth}
+            grow={1}
+          />
         ) : null}
 
         <div className="flex min-w-0 flex-1 flex-col">
@@ -1704,7 +2261,19 @@ function App() {
         </div>
 
         {aboutPanelOpen ? (
-          <aside className="flex w-[280px] shrink-0 flex-col border-l border-white/[0.08] bg-[#0d0d0d]">
+          <PanelResizeHandle
+            label="Resize the about panel"
+            width={aboutWidth}
+            limits={aboutPanel}
+            onWidthChange={setAboutWidth}
+            grow={-1}
+          />
+        ) : null}
+        {aboutPanelOpen ? (
+          <aside
+            className="flex shrink-0 flex-col border-l border-white/[0.08] bg-[#0d0d0d]"
+            style={{ width: aboutWidth }}
+          >
             <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.08] px-5" />
             <div className="modbots-scroll min-h-0 flex-1 overflow-y-auto p-5">
               <p className="text-sm font-semibold text-zinc-100">Mod Bots</p>
@@ -1737,40 +2306,198 @@ function App() {
               </div>
 
               <div className="mt-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3.5">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
-                  This week
-                </p>
-                <div className="mt-2.5 flex h-9 items-end gap-1">
-                  {weekPulse.days.map((count, index) => {
-                    const max = Math.max(...weekPulse.days, 1);
-                    const height =
-                      count === 0
-                        ? 8
-                        : Math.max(14, Math.round((count / max) * 100));
-
-                    return (
-                      <div
-                        key={index}
-                        className={`flex-1 rounded-sm ${
-                          index === 6 ? "bg-zinc-300" : "bg-zinc-800"
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
+                    Activity
+                  </p>
+                  <div
+                    className="flex rounded-md border border-white/[0.08] bg-[#0f0f0f] p-0.5"
+                    role="tablist"
+                    aria-label="Activity period"
+                  >
+                    {activityScopes.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={activityScope === option.id}
+                        onClick={() => setActivityScope(option.id)}
+                        className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                          activityScope === option.id
+                            ? "bg-white/[0.1] text-white"
+                            : "text-zinc-500 hover:text-zinc-200"
                         }`}
-                        style={{ height: `${height}%` }}
-                        title={`${count} ${count === 1 ? "message" : "messages"}`}
-                      />
-                    );
-                  })}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <p className="mt-2.5 text-xs text-zinc-500">
-                  <span className="font-medium text-zinc-300">
-                    {weekPulse.messages}
-                  </span>{" "}
-                  {weekPulse.messages === 1 ? "message" : "messages"} ·{" "}
-                  <span className="font-medium text-zinc-300">
-                    {weekPulse.moderationActions}
-                  </span>{" "}
-                  moderation{" "}
-                  {weekPulse.moderationActions === 1 ? "action" : "actions"}
-                </p>
+
+                {activityScope === "7d" ? (
+                  <div className="mt-2.5 grid grid-cols-7 gap-1.5">
+                    {activity.buckets.map((bucket, index) => (
+                      <div
+                        key={bucket.key}
+                        title={`${bucket.label} · ${bucket.count} ${
+                          bucket.count === 1 ? "message" : "messages"
+                        }`}
+                      >
+                        <div
+                          className={`h-7 rounded-md ${
+                            index === activity.buckets.length - 1
+                              ? "ring-1 ring-inset ring-white/40"
+                              : ""
+                          }`}
+                          style={{
+                            backgroundColor: bucketShade(
+                              bucket.count,
+                              activity.max,
+                            ),
+                          }}
+                        />
+                        <p
+                          className={`mt-1 text-center text-[9px] font-medium ${
+                            index === activity.buckets.length - 1
+                              ? "text-zinc-300"
+                              : "text-zinc-600"
+                          }`}
+                        >
+                          {bucket.initial}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <>
+                    <div className="mt-2.5 grid grid-cols-[repeat(auto-fill,minmax(12px,1fr))] gap-1">
+                      {activity.buckets.map((bucket, index) => (
+                        <div
+                          key={bucket.key}
+                          title={`${bucket.label} · ${bucket.count} ${
+                            bucket.count === 1 ? "message" : "messages"
+                          }`}
+                          className={`h-3 rounded-[3px] ${
+                            index === activity.buckets.length - 1
+                              ? "ring-1 ring-inset ring-white/40"
+                              : ""
+                          }`}
+                          style={{
+                            backgroundColor: bucketShade(
+                              bucket.count,
+                              activity.max,
+                            ),
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <div className="mt-1 flex items-center justify-between text-[9px] font-medium text-zinc-600">
+                      <span>{activity.rangeStartLabel}</span>
+                      <span>Today</span>
+                    </div>
+                  </>
+                )}
+
+                <div className="mt-2.5">
+                  <ActivitySection
+                    label="Messages"
+                    value={activity.messages.toLocaleString()}
+                    open={openActivity.messages === true}
+                    onToggle={() => toggleActivitySection("messages")}
+                  >
+                    {activity.messageRows.length === 0 ? (
+                      <p className="text-[11px] text-zinc-600">
+                        None in this period.
+                      </p>
+                    ) : (
+                      activity.messageRows.map((row) => (
+                        <ActivityCountRow
+                          key={row.label}
+                          label={`From ${row.label.toLocaleLowerCase()}`}
+                          count={row.count}
+                        />
+                      ))
+                    )}
+                  </ActivitySection>
+                  <ActivitySection
+                    label="Moderation"
+                    value={activity.moderationTotal.toLocaleString()}
+                    open={openActivity.moderation === true}
+                    onToggle={() => toggleActivitySection("moderation")}
+                  >
+                    {activity.moderationRows.length === 0 ? (
+                      <p className="text-[11px] text-zinc-600">
+                        None in this period.
+                      </p>
+                    ) : (
+                      activity.moderationRows.map((row) => (
+                        <ActivityCountRow
+                          key={row.label}
+                          label={row.label}
+                          count={row.count}
+                        />
+                      ))
+                    )}
+                  </ActivitySection>
+                  <ActivitySection
+                    label="Participants"
+                    value={activity.talkedTotal.toLocaleString()}
+                    open={openActivity.talked === true}
+                    onToggle={() => toggleActivitySection("talked")}
+                  >
+                    {activity.topPosters.length === 0 ? (
+                      <p className="text-[11px] text-zinc-600">
+                        None in this period.
+                      </p>
+                    ) : (
+                      <>
+                        <p className="text-[11px] text-zinc-600">
+                          {activity.talkedRows
+                            .map(
+                              (row) =>
+                                `${row.count} ${row.label.toLocaleLowerCase()}`,
+                            )
+                            .join(" · ")}
+                        </p>
+                        {activity.topPosters.map((poster) => {
+                          const posterActor = actors.get(poster.actorId);
+                          const posterName = actorLabel(
+                            poster.actorId,
+                            actors,
+                          );
+
+                          return (
+                            <div
+                              key={poster.actorId}
+                              className="flex items-center gap-2"
+                            >
+                              <span
+                                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-white/10 text-[8px] font-semibold text-zinc-200"
+                                style={{
+                                  backgroundColor: shadeFor(poster.actorId),
+                                }}
+                              >
+                                {monogram(posterName)}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-[11px] text-zinc-300">
+                                {posterName}
+                              </span>
+                              {posterActor !== undefined &&
+                              posterActor.type !== "human" ? (
+                                <span className="shrink-0 text-zinc-600">
+                                  {roleBadgeIcon(posterActor.type)}
+                                </span>
+                              ) : null}
+                              <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">
+                                {poster.count.toLocaleString()}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+                  </ActivitySection>
+                </div>
               </div>
 
               {rules.data !== undefined ? (
