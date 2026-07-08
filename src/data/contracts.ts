@@ -7,6 +7,8 @@ export interface Actor {
   discriminator: string | null;
   registered: boolean;
   display: string;
+  profilePictureId: string | null;
+  profilePictureUrl: string | null;
   type: ActorType;
   policyVersionAccepted: string | null;
   policyAcceptedAt: string | null;
@@ -37,6 +39,13 @@ export interface ActorSession {
   token: string;
   expiresAt: string;
 }
+
+// Who a message is directed at, matching the backend content contract:
+// the whole room, or specific actors. Absent or empty means a general
+// comment addressed to no one in particular.
+export type ContentAddress =
+  | { targetType: "room" }
+  | { targetType: "actor"; actorId: string };
 
 export interface RoomEvent {
   sequence: string;

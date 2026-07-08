@@ -1,12 +1,14 @@
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type {
   FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
   ReactNode,
 } from "react";
 import startScreenBg from "./assets/start-screen-bg.png";
 import {
   ArrowRight,
+  AtSign,
   Bot,
   CalendarDays,
   Check,
@@ -30,7 +32,12 @@ import {
   Users,
   X,
 } from "lucide-react";
-import type { Actor, ActorType, RoomEvent } from "./data/contracts";
+import type {
+  Actor,
+  ActorType,
+  ContentAddress,
+  RoomEvent,
+} from "./data/contracts";
 import {
   getBrowserLoginSession,
   openInBrowser,
@@ -41,7 +48,7 @@ import type {
   BrowserLoginSession,
 } from "./data/oauth";
 import { isMutedError } from "./data/platform";
-import { actorLabel } from "./data/room-state";
+import { actorLabel, actorRole } from "./data/room-state";
 import { useRoomActivity } from "./hooks/useRoomActivity";
 import "./App.css";
 
@@ -52,8 +59,9 @@ const roomAbout =
   "to moderate from everything that happens.";
 const appVersion = "0.0.1-alpha";
 
-const groupWindowMs = 5 * 60 * 1000;
+const groupWindowMs = 45 * 1000;
 const browserLoginWaitMs = 90_000;
+const participantActiveWindowMs = 5 * 60 * 1000;
 
 const participantsPanel = { min: 200, max: 360, initial: 260 };
 const aboutPanel = { min: 230, max: 400, initial: 280 };
@@ -62,7 +70,7 @@ const panelResizeStep = 16;
 const clampWidth = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value));
 
-const avatarShades = [
+const profilePictureShades = [
   "#202020",
   "#272727",
   "#2f2f2f",
@@ -101,6 +109,108 @@ const payloadReply = (event: RoomEvent): { contentItemId: string } | null => {
 
   return null;
 };
+
+// Who a message was directed at, read from the same `addressedTo` the
+// backend now carries on every message. A general comment has none.
+const payloadAddressedTo = (event: RoomEvent): ContentAddress[] => {
+  const value = event.payload.addressedTo;
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const targets: ContentAddress[] = [];
+
+  for (const raw of value) {
+    if (typeof raw !== "object" || raw === null) {
+      continue;
+    }
+
+    const target = raw as { targetType?: unknown; actorId?: unknown };
+
+    if (target.targetType === "room") {
+      targets.push({ targetType: "room" });
+    } else if (
+      target.targetType === "actor" &&
+      typeof target.actorId === "string"
+    ) {
+      targets.push({ targetType: "actor", actorId: target.actorId });
+    }
+  }
+
+  return targets;
+};
+
+// The keywords that address the whole room, matching the runtime's own
+// parsing so a human and a bot mean the same thing by "@everyone".
+const roomAddressPattern = /@(room|everyone|everybody|all)\b/i;
+
+// Derive the structural targets from the composed text, using the roster as
+// the dictionary. The text is the single source of truth, exactly as the
+// runtime derives a bot's addressing from what it says. A room mention wins
+// and stands alone, otherwise each named participant becomes an actor target.
+const deriveAddressedTo = (
+  text: string,
+  participants: Actor[],
+): ContentAddress[] => {
+  if (roomAddressPattern.test(text)) {
+    return [{ targetType: "room" }];
+  }
+
+  const targets: ContentAddress[] = [];
+
+  for (const actor of participants) {
+    const escaped = actor.display.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // The `@` must open a word, as in the composer picker, so an email or
+    // handle like "bob@Arwen" never addresses anyone; the trailing boundary
+    // keeps "@Ru" from matching inside "@Rufus".
+    const pattern = new RegExp(`(?:^|\\s)@${escaped}(?![\\w#-])`, "i");
+
+    if (pattern.test(text)) {
+      targets.push({ targetType: "actor", actorId: actor.id });
+    }
+
+    if (targets.length >= 16) {
+      break;
+    }
+  }
+
+  return targets;
+};
+
+// The `@mention` token the caret currently sits inside, if any: an `@`
+// that opens a word (start of line or after whitespace) with no whitespace
+// between it and the caret. Drives the composer's participant picker.
+const mentionAt = (
+  text: string,
+  caret: number,
+): { start: number; query: string } | null => {
+  let index = caret - 1;
+
+  while (index >= 0) {
+    const char = text[index];
+
+    if (char === "@") {
+      const before = index === 0 ? "" : text[index - 1];
+
+      if (before === "" || /\s/.test(before)) {
+        return { start: index, query: text.slice(index + 1, caret) };
+      }
+
+      return null;
+    }
+
+    if (/\s/.test(char)) {
+      return null;
+    }
+
+    index -= 1;
+  }
+
+  return null;
+};
+
+type MentionOption = { kind: "room" } | { kind: "actor"; actor: Actor };
 
 const formatTime = (value: string): string =>
   new Intl.DateTimeFormat(undefined, {
@@ -150,6 +260,8 @@ const isVisibleParticipant = (actor: Actor): boolean =>
   actor.type !== "human" || actor.policyAcceptedAt !== null;
 
 type ActivityScope = "7d" | "30d" | "all";
+
+type ParticipantStatus = "active" | "idle" | "offline";
 
 const activityScopes: Array<{ id: ActivityScope; label: string }> = [
   { id: "7d", label: "7d" },
@@ -205,8 +317,11 @@ const shadeFor = (actorId: string | null): string => {
     hash = (hash * 31 + actorId.charCodeAt(index)) >>> 0;
   }
 
-  return avatarShades[hash % avatarShades.length];
+  return profilePictureShades[hash % profilePictureShades.length];
 };
+
+const actorProfilePictureUrl = (actor: Actor | undefined): string | null =>
+  actor?.profilePictureUrl ?? null;
 
 const roleBadgeIcon = (type: ActorType) => {
   if (type === "mod_bot") {
@@ -413,7 +528,7 @@ function PanelResizeHandle({
   );
 }
 
-function ActorAvatar({
+function ActorProfilePicture({
   actor,
   actorId,
   name,
@@ -426,10 +541,16 @@ function ActorAvatar({
 }) {
   const dimensions =
     size === "sm"
-      ? "h-8 w-8 rounded-xl text-[11px]"
+      ? "h-8 w-8 rounded-xl text-[10px]"
       : size === "lg"
-        ? "h-16 w-16 rounded-2xl text-lg"
-        : "h-10 w-10 rounded-xl text-xs";
+        ? "h-16 w-16 rounded-2xl text-[15px]"
+        : "h-10 w-10 rounded-xl text-[11px]";
+  const imageUrl = actorProfilePictureUrl(actor);
+  const [imageFailed, setImageFailed] = useState(false);
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [imageUrl]);
 
   return (
     <div className="relative shrink-0">
@@ -437,7 +558,16 @@ function ActorAvatar({
         className={`flex ${dimensions} items-center justify-center border border-white/10 font-semibold text-zinc-100`}
         style={{ backgroundColor: shadeFor(actorId) }}
       >
-        {monogram(name)}
+        {imageUrl !== null && !imageFailed ? (
+          <img
+            src={imageUrl}
+            alt={name}
+            className="h-full w-full rounded-inherit object-cover"
+            onError={() => setImageFailed(true)}
+          />
+        ) : (
+          monogram(name)
+        )}
       </div>
       {actor !== undefined && actor.type !== "human" ? (
         <span className="absolute -bottom-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border border-black/70 bg-[#0d0d0d] text-zinc-300">
@@ -469,7 +599,7 @@ function MenuBar({
                 onOpenMenu(menu.id);
               }
             }}
-            className={`rounded-md px-2.5 py-1 text-[13px] transition ${
+            className={`rounded-md px-2.5 py-1 text-[12px] transition ${
               openMenu === menu.id
                 ? "bg-white/[0.1] text-white"
                 : "text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100"
@@ -489,7 +619,7 @@ function MenuBar({
                     onOpenMenu(null);
                     item.onSelect?.();
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-zinc-300 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:text-zinc-600 disabled:hover:bg-transparent"
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-zinc-300 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:text-zinc-600 disabled:hover:bg-transparent"
                 >
                   <span className="flex w-4 shrink-0 justify-center text-zinc-400">
                     {item.checked ? <Check className="h-3.5 w-3.5" /> : null}
@@ -593,6 +723,57 @@ function MessageActions({ onReply }: { onReply?: () => void }) {
   );
 }
 
+function AddressChips({
+  targets,
+  actors,
+  localActorId,
+}: {
+  targets: ContentAddress[];
+  actors: Map<string, Actor>;
+  localActorId: string | undefined;
+}) {
+  if (targets.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
+      <AtSign className="h-3 w-3 shrink-0 text-zinc-600" />
+      <span className="text-zinc-600">to</span>
+      {targets.map((target, index) => {
+        if (target.targetType === "room") {
+          return (
+            <span
+              key={`room-${index}`}
+              className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-medium text-zinc-400"
+            >
+              Room
+            </span>
+          );
+        }
+
+        const isYou = target.actorId === localActorId;
+        const label =
+          actors.get(target.actorId)?.displayName ??
+          actorLabel(target.actorId, actors);
+
+        return (
+          <span
+            key={`${target.actorId}-${index}`}
+            className={
+              isYou
+                ? "rounded-md border border-white/20 bg-white/[0.08] px-1.5 py-0.5 font-medium text-zinc-100"
+                : "rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-medium text-zinc-400"
+            }
+          >
+            {isYou ? "you" : `@${label}`}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function ChatMessage({
   actors,
   event,
@@ -614,17 +795,23 @@ function ChatMessage({
   const content =
     payloadString(event, "content") ?? "Message content unavailable";
   const isReply = payloadReply(event) !== null;
+  const addressedTo = payloadAddressedTo(event);
 
   if (grouped) {
     return (
-      <article className="group relative flex gap-3 px-4 py-0.5 hover:bg-white/[0.035] sm:px-6">
-        <div className="flex w-10 shrink-0 justify-center">
+      <article className="group relative flex gap-3 px-4 py-1 hover:bg-white/[0.03] sm:px-6">
+        <div className="flex w-8 shrink-0 justify-center">
           <time className="mt-1 hidden text-[10px] tabular-nums text-zinc-600 group-hover:block">
             {formatTime(event.occurredAt)}
           </time>
         </div>
         <div className="min-w-0 flex-1 pr-20">
-          <p className="max-w-[90ch] whitespace-pre-wrap break-words text-[14px] leading-[22px] text-zinc-200">
+          <AddressChips
+            targets={addressedTo}
+            actors={actors}
+            localActorId={localActorId}
+          />
+          <p className="max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
             {content}
           </p>
         </div>
@@ -634,12 +821,14 @@ function ChatMessage({
   }
 
   return (
-    <article className="group relative mt-2 flex gap-3 px-4 py-0.5 hover:bg-white/[0.035] sm:px-6">
-      <ActorAvatar actor={actor} actorId={event.actorId} name={name} />
+    <article className="group relative mt-5 flex gap-3 px-4 py-1 hover:bg-white/[0.03] sm:px-6">
+      <div className="w-8 shrink-0">
+        <ActorProfilePicture actor={actor} actorId={event.actorId} name={name} size="sm" />
+      </div>
 
       <div className="min-w-0 flex-1 pr-20">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="text-[13px] font-semibold text-zinc-100">{name}</span>
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-[12px] font-semibold text-zinc-100">{name}</span>
           {actor?.type !== "human" && actor !== undefined ? (
             <span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-zinc-400">
               {formatRole(actor)}
@@ -648,25 +837,28 @@ function ChatMessage({
           {ownMessage ? (
             <span className="text-[11px] text-zinc-500">You</span>
           ) : null}
-          <time className="text-[11px] tabular-nums text-zinc-500">
+          <time className="text-[10px] tabular-nums text-zinc-500">
             {formatTime(event.occurredAt)}
           </time>
         </div>
         {isReply ? (
-          <div className="mt-1 flex min-w-0 max-w-[70ch] items-stretch overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.03]">
-            <span className="w-1 shrink-0 bg-zinc-500" />
-            <div className="min-w-0 px-2.5 py-1.5">
+          <div className="mt-2 flex min-w-0 max-w-[64ch] items-stretch overflow-hidden rounded-xl border border-white/[0.08] bg-[#121212] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+            <span className="w-1 shrink-0 bg-zinc-400/80" />
+            <div className="min-w-0 px-3 py-2">
               {repliedEvent === null ? (
-                <p className="text-[12px] italic text-zinc-500">
+                <p className="text-[11px] italic text-zinc-500">
                   Earlier message
                 </p>
               ) : (
                 <>
-                  <p className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-300">
+                  <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-zinc-500">
                     <CornerUpLeft className="h-3 w-3 shrink-0 text-zinc-500" />
+                    Replying to
+                  </p>
+                  <p className="mt-0.5 truncate text-[11px] font-medium text-zinc-300">
                     {actorLabel(repliedEvent.actorId, actors)}
                   </p>
-                  <p className="truncate text-[12px] leading-5 text-zinc-500">
+                  <p className="mt-0.5 truncate text-[11px] leading-5 text-zinc-500">
                     {payloadString(repliedEvent, "content")}
                   </p>
                 </>
@@ -674,7 +866,12 @@ function ChatMessage({
             </div>
           </div>
         ) : null}
-        <p className="mt-0.5 max-w-[90ch] whitespace-pre-wrap break-words text-[14px] leading-[22px] text-zinc-200">
+        <AddressChips
+          targets={addressedTo}
+          actors={actors}
+          localActorId={localActorId}
+        />
+        <p className="mt-1.5 max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
           {content}
         </p>
       </div>
@@ -775,24 +972,58 @@ function ActivityCountRow({ label, count }: { label: string; count: number }) {
   );
 }
 
-function ParticipantRow({ actor }: { actor: Actor }) {
+function ParticipantRow({
+  actor,
+  status,
+}: {
+  actor: Actor;
+  status: ParticipantStatus;
+}) {
+  const statusStyles: Record<
+    ParticipantStatus,
+    { dot: string; label: string; text: string }
+  > = {
+    active: {
+      dot: "bg-emerald-400",
+      label: "Active",
+      text: "text-emerald-300",
+    },
+    idle: {
+      dot: "bg-amber-400",
+      label: "Idle",
+      text: "text-amber-300",
+    },
+    offline: {
+      dot: "bg-zinc-500",
+      label: "Offline",
+      text: "text-zinc-500",
+    },
+  };
+
+  const currentStatus = statusStyles[status];
+
   return (
     <div className="flex items-center gap-3 rounded-xl px-2 py-1.5 hover:bg-white/[0.04]">
       <div className="relative">
-        <ActorAvatar
+        <ActorProfilePicture
           actor={actor}
           actorId={actor.id}
           name={actor.display}
           size="sm"
         />
         <span
-          className="absolute -bottom-0.5 -left-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#0d0d0d] bg-zinc-200"
-          title="Online"
+          className={`absolute -bottom-0.5 -left-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#0d0d0d] ${currentStatus.dot}`}
+          title={currentStatus.label}
         />
       </div>
-      <p className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-200">
-        {actor.display}
-      </p>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[13px] font-medium text-zinc-200">
+          {actor.display}
+        </p>
+        <p className={`mt-0.5 text-[10px] font-medium uppercase tracking-[0.08em] ${currentStatus.text}`}>
+          {currentStatus.label}
+        </p>
+      </div>
     </div>
   );
 }
@@ -809,7 +1040,7 @@ function ProfileStat({
       <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600">
         {label}
       </p>
-      <p className="mt-1 text-[15px] font-semibold text-zinc-100">{value}</p>
+      <p className="mt-1 text-[13px] font-semibold text-zinc-100">{value}</p>
     </div>
   );
 }
@@ -835,7 +1066,7 @@ function ProfileDetailRow({
           {label}
         </p>
         <p
-          className={`mt-0.5 text-[13px] leading-5 ${
+          className={`mt-0.5 text-[12px] leading-5 ${
             subtle ? "text-zinc-400" : "text-zinc-200"
           }`}
         >
@@ -1068,7 +1299,7 @@ function StartScreen({
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-white/10 bg-[#171717]">
             <Bot className="h-6 w-6 text-zinc-200" />
           </div>
-          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-white">
+          <h1 className="mt-5 text-[26px] font-semibold tracking-tight text-white">
             Mod Bots
           </h1>
           <p className="mx-auto mt-2 max-w-[34ch] text-sm leading-6 text-zinc-500">
@@ -1211,6 +1442,10 @@ function App() {
   const [openRuleId, setOpenRuleId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [replyTarget, setReplyTarget] = useState<RoomEvent | null>(null);
+  // The active participant picker in the composer, opened by typing `@`.
+  const [mention, setMention] = useState<{ query: string; index: number } | null>(
+    null,
+  );
   const [openMenu, setOpenMenu] = useState<MenuId | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -1219,6 +1454,7 @@ function App() {
   const [entered, setEntered] = useState(false);
   const presenceJoinedAs = useRef<string | null>(null);
   const conversationViewport = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const apiConnected = apiHealth.data?.status === "ok";
   const chatBotCount = onlineActorIds.filter(
@@ -1227,16 +1463,100 @@ function App() {
   const modBotCount = onlineActorIds.filter(
     (actorId) => actors.get(actorId)?.type === "mod_bot",
   ).length;
+  const participantStatuses = useMemo(() => {
+    const statuses = new Map<
+      string,
+      {
+        present: boolean;
+        lastActivityAt: number | null;
+      }
+    >();
+
+    for (const event of events.data ?? []) {
+      if (event.actorId === null) {
+        continue;
+      }
+
+      const current = statuses.get(event.actorId) ?? {
+        present: false,
+        lastActivityAt: null,
+      };
+      const occurredAt = new Date(event.occurredAt).getTime();
+
+      if (event.type === "actor_joined") {
+        current.present = true;
+        current.lastActivityAt = occurredAt;
+      } else if (event.type === "actor_left") {
+        current.present = false;
+      } else if (
+        event.type === "message_posted" ||
+        event.type === "content_posted" ||
+        event.type === "moderation_action_applied"
+      ) {
+        current.lastActivityAt = occurredAt;
+      }
+
+      statuses.set(event.actorId, current);
+    }
+
+    return statuses;
+  }, [events.data]);
   const visibleOnlineActors = onlineActorIds
     .map((actorId) => actors.get(actorId))
     .filter(
       (actor): actor is Actor =>
         actor !== undefined && isVisibleParticipant(actor),
     );
-  const roster = roleOrder.map((type) => ({
-    type,
-    members: visibleOnlineActors.filter((actor) => actor.type === type),
-  }));
+  const roster = useMemo(() => {
+    const now = Date.now();
+    const onlineHumans = visibleOnlineActors.filter(
+      (actor) => actor.type === "human",
+    );
+    const botResidents = [...actors.values()]
+      .filter(
+        (actor) =>
+          actor.retiredAt === null &&
+          actor.profilePictureUrl !== null &&
+          (actor.type === "chat_bot" || actor.type === "mod_bot"),
+      )
+      .sort((left, right) => left.display.localeCompare(right.display));
+
+    const statusFor = (actor: Actor): ParticipantStatus => {
+      const state = participantStatuses.get(actor.id);
+      const lastActivityAt = state?.lastActivityAt ?? null;
+
+      if (actor.type === "human") {
+        return lastActivityAt !== null &&
+          now - lastActivityAt <= participantActiveWindowMs
+          ? "active"
+          : "idle";
+      }
+
+      if (state?.present !== true) {
+        return "offline";
+      }
+
+      return lastActivityAt !== null &&
+        now - lastActivityAt <= participantActiveWindowMs
+        ? "active"
+        : "idle";
+    };
+
+    const membersByType: Record<ActorType, Array<{ actor: Actor; status: ParticipantStatus }>> = {
+      human: onlineHumans.map((actor) => ({ actor, status: statusFor(actor) })),
+      chat_bot: botResidents
+        .filter((actor) => actor.type === "chat_bot")
+        .map((actor) => ({ actor, status: statusFor(actor) })),
+      mod_bot: botResidents
+        .filter((actor) => actor.type === "mod_bot")
+        .map((actor) => ({ actor, status: statusFor(actor) })),
+    };
+
+    return roleOrder.map((type) => ({
+      type,
+      members: membersByType[type],
+    }));
+  }, [actors, participantStatuses, visibleOnlineActors]);
   const roomEvents = useMemo(() => {
     const query = searchQuery.trim().toLocaleLowerCase();
 
@@ -1516,6 +1836,143 @@ function App() {
       online: onlineActorIds.includes(localActor.id),
     };
   }, [events.data, localActor, onlineActorIds]);
+  // Everyone a human can address: the bot residents, always in the room, and
+  // any other human currently present. Yourself and the platform are never
+  // addressees.
+  const addressableParticipants = useMemo(() => {
+    const seen = new Set<string>();
+    const list: Actor[] = [];
+    const consider = (actor: Actor | undefined) => {
+      if (
+        actor === undefined ||
+        actor.retiredAt !== null ||
+        actor.id === localActor?.id ||
+        seen.has(actor.id) ||
+        !isVisibleParticipant(actor)
+      ) {
+        return;
+      }
+
+      seen.add(actor.id);
+      list.push(actor);
+    };
+
+    for (const actor of actors.values()) {
+      if (actor.type === "chat_bot" || actor.type === "mod_bot") {
+        consider(actor);
+      }
+    }
+
+    for (const actorId of onlineActorIds) {
+      consider(actors.get(actorId));
+    }
+
+    return list.sort((left, right) => left.display.localeCompare(right.display));
+  }, [actors, onlineActorIds, localActor]);
+  const mentionOptions = useMemo((): MentionOption[] => {
+    if (mention === null) {
+      return [];
+    }
+
+    const query = mention.query.toLowerCase();
+    const options: MentionOption[] = [];
+
+    if (
+      query.length === 0 ||
+      "room".startsWith(query) ||
+      "everyone".startsWith(query)
+    ) {
+      options.push({ kind: "room" });
+    }
+
+    for (const actor of addressableParticipants) {
+      if (
+        query.length === 0 ||
+        actor.displayName.toLowerCase().includes(query) ||
+        actor.display.toLowerCase().includes(query)
+      ) {
+        options.push({ kind: "actor", actor });
+      }
+    }
+
+    return options.slice(0, 8);
+  }, [mention, addressableParticipants]);
+  const updateMentionState = (text: string, caret: number) => {
+    const found = mentionAt(text, caret);
+    setMention(found === null ? null : { query: found.query, index: 0 });
+  };
+  const applyMention = (option: MentionOption) => {
+    const caret = composerRef.current?.selectionStart ?? draft.length;
+    const found = mentionAt(draft, caret);
+
+    if (found === null) {
+      setMention(null);
+      return;
+    }
+
+    const token =
+      option.kind === "room" ? "@room" : `@${option.actor.display}`;
+    const insertion = `${token} `;
+    const before = draft.slice(0, found.start);
+    const after = draft.slice(caret);
+    const nextCaret = before.length + insertion.length;
+
+    setDraft(`${before}${insertion}${after}`);
+    setMention(null);
+
+    requestAnimationFrame(() => {
+      const element = composerRef.current;
+
+      if (element !== null) {
+        element.focus();
+        element.setSelectionRange(nextCaret, nextCaret);
+      }
+    });
+  };
+  const handleComposerKeyDown = (
+    event: ReactKeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (mention !== null && mentionOptions.length > 0) {
+      const count = mentionOptions.length;
+      const active = Math.min(mention.index, count - 1);
+
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setMention({ query: mention.query, index: (active + 1) % count });
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setMention({
+          query: mention.query,
+          index: (active - 1 + count) % count,
+        });
+        return;
+      }
+
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        applyMention(mentionOptions[active]);
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMention(null);
+        return;
+      }
+    }
+
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  };
   const canSend =
     localActor !== undefined &&
     apiConnected &&
@@ -1716,11 +2173,13 @@ function App() {
     }
 
     setDraft("");
+    setMention(null);
     setMutedNotice(null);
     const replyContentItemId =
       replyTarget === null
         ? null
         : payloadString(replyTarget, "contentItemId");
+    const addressedTo = deriveAddressedTo(content, addressableParticipants);
 
     try {
       await sendMessage.mutateAsync({
@@ -1728,6 +2187,7 @@ function App() {
         ...(replyContentItemId === null
           ? {}
           : { replyTo: { contentItemId: replyContentItemId } }),
+        ...(addressedTo.length === 0 ? {} : { addressedTo }),
       });
       setReplyTarget(null);
     } catch (sendFailure) {
@@ -1796,8 +2256,12 @@ function App() {
                       {roleLabels[group.type]} · {group.members.length}
                     </p>
                     <div className="space-y-0.5">
-                      {group.members.map((actor) => (
-                        <ParticipantRow key={actor.id} actor={actor} />
+                      {group.members.map((member) => (
+                        <ParticipantRow
+                          key={member.actor.id}
+                          actor={member.actor}
+                          status={member.status}
+                        />
                       ))}
                     </div>
                   </div>
@@ -1813,7 +2277,7 @@ function App() {
                 >
                   <div className="border-b border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.08),transparent_45%)] px-4 py-4">
                     <div className="flex items-start gap-3">
-                      <ActorAvatar
+                      <ActorProfilePicture
                         actor={localActor}
                         actorId={localActor.id}
                         name={localActor.display}
@@ -1821,17 +2285,17 @@ function App() {
                       />
                       <div className="min-w-0 flex-1 pt-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <p className="truncate text-[21px] font-semibold leading-6 text-zinc-50">
+                          <p className="truncate text-[18px] font-semibold leading-6 text-zinc-50">
                             {localActor.display}
                           </p>
                           <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-300">
                             {localProfile.accountLabel}
                           </span>
                         </div>
-                        <p className="mt-1 truncate text-sm text-zinc-400">
+                        <p className="mt-1 truncate text-[12px] text-zinc-400">
                           {localProfile.handleLabel}
                         </p>
-                        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-zinc-400">
+                        <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-zinc-400">
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-black/20 px-2.5 py-1">
                             <span
                               className={`h-2 w-2 rounded-full ${
@@ -1917,7 +2381,7 @@ function App() {
                         setUserMenuOpen(false);
                         void signOut();
                       }}
-                      className="flex w-full items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3 py-3 text-left text-[13px] text-zinc-300 transition-colors hover:border-white/12 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                      className="flex w-full items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3 py-3 text-left text-[12px] text-zinc-300 transition-colors hover:border-white/12 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
                     >
                       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-black/20 text-zinc-400">
                         <LogOut className="h-4 w-4" />
@@ -1951,7 +2415,7 @@ function App() {
                 }`}
               >
                 <div className="relative">
-                  <ActorAvatar
+                  <ActorProfilePicture
                     actor={localActor}
                     actorId={localActor?.id ?? null}
                     name={localActor?.display ?? "You"}
@@ -1963,7 +2427,7 @@ function App() {
                 </div>
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2">
-                    <span className="block min-w-0 flex-1 truncate text-[14px] font-semibold leading-5 text-zinc-100">
+                    <span className="block min-w-0 flex-1 truncate text-[13px] font-semibold leading-5 text-zinc-100">
                       {localActor?.display ??
                         (hasIdentity ? "Preparing session..." : "Not joined")}
                     </span>
@@ -1974,7 +2438,7 @@ function App() {
                     ) : null}
                   </span>
                   {localProfile !== null ? (
-                    <span className="mt-1 block truncate text-[12px] leading-5 text-zinc-400">
+                    <span className="mt-1 block truncate text-[11px] leading-5 text-zinc-400">
                       {localProfile.handleLabel}
                     </span>
                   ) : null}
@@ -2012,7 +2476,7 @@ function App() {
 
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="z-10 flex h-[68px] shrink-0 items-center gap-4 border-b border-white/[0.08] bg-[#0d0d0d] px-5">
-            <h2 className="shrink-0 text-[15px] font-semibold text-white">Chat</h2>
+            <h2 className="shrink-0 text-[14px] font-semibold text-white">Chat</h2>
             <div className="flex-1" />
             <div className="flex h-9 w-[min(32vw,380px)] items-center gap-2 rounded-lg border border-white/10 bg-[#181818] px-3">
               <Search className="h-4 w-4 shrink-0 text-zinc-500" />
@@ -2149,8 +2613,69 @@ function App() {
                 ) : null}
                 <form
                   onSubmit={(event) => void submitMessage(event)}
-                  className="rounded-2xl border border-white/10 bg-[#171717] shadow-[0_16px_50px_rgba(0,0,0,0.35)] focus-within:border-white/20"
+                  className="relative rounded-2xl border border-white/10 bg-[#171717] shadow-[0_16px_50px_rgba(0,0,0,0.35)] focus-within:border-white/20"
                 >
+                  {mention !== null && mentionOptions.length > 0 ? (
+                    <div className="absolute bottom-full left-0 mb-2 w-72 overflow-hidden rounded-xl border border-white/10 bg-[#181818] p-1 shadow-2xl">
+                      <p className="px-2 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-zinc-600">
+                        Address someone
+                      </p>
+                      {mentionOptions.map((option, index) => {
+                        const active =
+                          index ===
+                          Math.min(mention.index, mentionOptions.length - 1);
+
+                        return (
+                          <button
+                            key={option.kind === "room" ? "room" : option.actor.id}
+                            type="button"
+                            onMouseDown={(pointerEvent) => {
+                              pointerEvent.preventDefault();
+                              applyMention(option);
+                            }}
+                            className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${
+                              active
+                                ? "bg-white/[0.08] text-white"
+                                : "text-zinc-300 hover:bg-white/[0.05]"
+                            }`}
+                          >
+                            {option.kind === "room" ? (
+                              <>
+                                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-zinc-300">
+                                  <Users className="h-4 w-4" />
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="block text-[13px] font-medium">
+                                    Room
+                                  </span>
+                                  <span className="block truncate text-[11px] text-zinc-500">
+                                    Everyone here
+                                  </span>
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <ActorProfilePicture
+                                  actor={option.actor}
+                                  actorId={option.actor.id}
+                                  name={option.actor.display}
+                                  size="sm"
+                                />
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-[13px] font-medium">
+                                    {option.actor.displayName}
+                                  </span>
+                                  <span className="block truncate text-[11px] text-zinc-500">
+                                    {actorRole(option.actor.id, actors)}
+                                  </span>
+                                </span>
+                              </>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                   {replyTarget !== null ? (
                     <div className="flex items-center gap-2 border-b border-white/[0.08] px-4 py-2 text-xs">
                       <CornerUpLeft className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
@@ -2174,18 +2699,24 @@ function App() {
                     </div>
                   ) : null}
                   <textarea
+                    ref={composerRef}
                     value={draft}
-                    onChange={(event) => setDraft(event.currentTarget.value)}
-                    onKeyDown={(event) => {
-                      if (
-                        event.key === "Enter" &&
-                        !event.shiftKey &&
-                        !event.nativeEvent.isComposing
-                      ) {
-                        event.preventDefault();
-                        event.currentTarget.form?.requestSubmit();
-                      }
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setDraft(value);
+                      updateMentionState(
+                        value,
+                        event.currentTarget.selectionStart ?? value.length,
+                      );
                     }}
+                    onSelect={(event) =>
+                      updateMentionState(
+                        event.currentTarget.value,
+                        event.currentTarget.selectionStart ?? 0,
+                      )
+                    }
+                    onBlur={() => setMention(null)}
+                    onKeyDown={handleComposerKeyDown}
                     rows={1}
                     maxLength={4_000}
                     disabled={localActor === undefined || !apiConnected}
@@ -2194,7 +2725,7 @@ function App() {
                         ? "Preparing your session..."
                         : "Message the room"
                     }
-                    className="max-h-40 min-h-[58px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-[15px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500 disabled:cursor-not-allowed"
+                    className="max-h-40 min-h-[58px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-[14px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500 disabled:cursor-not-allowed"
                   />
                   <div className="flex items-center justify-between px-2 pb-2">
                     <div className="flex items-center gap-0.5">
@@ -2276,12 +2807,12 @@ function App() {
           >
             <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.08] px-5" />
             <div className="modbots-scroll min-h-0 flex-1 overflow-y-auto p-5">
-              <p className="text-sm font-semibold text-zinc-100">Mod Bots</p>
-              <p className="mt-1 text-sm leading-6 text-zinc-400">
+              <p className="text-[13px] font-semibold text-zinc-100">Mod Bots</p>
+              <p className="mt-1 text-[13px] leading-5 text-zinc-400">
                 {roomAbout}
               </p>
 
-              <div className="mt-4 space-y-2.5 text-sm text-zinc-400">
+              <div className="mt-4 space-y-2.5 text-[13px] text-zinc-400">
                 <p className="flex items-start gap-2.5">
                   <Bot className="mt-0.5 h-4 w-4 shrink-0 text-zinc-500" />
                   <span>

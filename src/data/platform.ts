@@ -3,6 +3,7 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import type {
   Actor,
   ActorSession,
+  ContentAddress,
   ParticipationPolicy,
   RealtimeConfig,
   RoomEvent,
@@ -176,6 +177,7 @@ export const postRoomMessage = (
   actorId: string,
   content: string,
   replyTo?: { contentItemId: string },
+  addressedTo?: ContentAddress[],
 ): Promise<RoomEvent> =>
   requestJson(apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/messages`), {
     method: "POST",
@@ -184,6 +186,9 @@ export const postRoomMessage = (
       actorId,
       content,
       ...(replyTo === undefined ? {} : { replyTo }),
+      ...(addressedTo === undefined || addressedTo.length === 0
+        ? {}
+        : { addressedTo }),
     }),
   });
 

@@ -7,6 +7,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import type {
   Actor,
+  ContentAddress,
   RealtimeStatus,
   RoomEvent,
 } from "../data/contracts";
@@ -198,6 +199,7 @@ export const useRoomActivity = (roomId: string) => {
     mutationFn: async (message: {
       content: string;
       replyTo?: { contentItemId: string };
+      addressedTo?: ContentAddress[];
     }) => {
       if (localActor === undefined) {
         throw new Error("Join the room before sending messages.");
@@ -208,6 +210,7 @@ export const useRoomActivity = (roomId: string) => {
         localActor.id,
         message.content,
         message.replyTo,
+        message.addressedTo,
       );
     },
     onSuccess: (event) => {
