@@ -8,7 +8,6 @@ import type {
 import startScreenBg from "./assets/start-screen-bg.png";
 import {
   ArrowRight,
-  AtSign,
   Bot,
   CalendarDays,
   Check,
@@ -110,40 +109,110 @@ const payloadReply = (event: RoomEvent): { contentItemId: string } | null => {
   return null;
 };
 
-// Who a message was directed at, read from the same `addressedTo` the
-// backend now carries on every message. A general comment has none.
-const payloadAddressedTo = (event: RoomEvent): ContentAddress[] => {
-  const value = event.payload.addressedTo;
-
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const targets: ContentAddress[] = [];
-
-  for (const raw of value) {
-    if (typeof raw !== "object" || raw === null) {
-      continue;
-    }
-
-    const target = raw as { targetType?: unknown; actorId?: unknown };
-
-    if (target.targetType === "room") {
-      targets.push({ targetType: "room" });
-    } else if (
-      target.targetType === "actor" &&
-      typeof target.actorId === "string"
-    ) {
-      targets.push({ targetType: "actor", actorId: target.actorId });
-    }
-  }
-
-  return targets;
-};
-
 // The keywords that address the whole room, matching the runtime's own
 // parsing so a human and a bot mean the same thing by "@everyone".
-const roomAddressPattern = /@(room|everyone|everybody|all)\b/i;
+const roomAddressWords = ["room", "everyone", "everybody", "all"];
+const roomAddressPattern = new RegExp(
+  `@(${roomAddressWords.join("|")})\\b`,
+  "i",
+);
+
+// A label the message renderer can turn into an inline mention pill: a room
+// keyword, or a participant matched by the exact `@display` a human or bot
+// would have typed, carrying the clean name to show.
+type MentionLabel =
+  | { text: string; kind: "room" }
+  | { text: string; kind: "actor"; actorId: string; label: string };
+
+const buildMentionLabels = (actors: Map<string, Actor>): MentionLabel[] => {
+  const labels: MentionLabel[] = roomAddressWords.map((text) => ({
+    text,
+    kind: "room",
+  }));
+
+  for (const actor of actors.values()) {
+    labels.push({
+      text: actor.display,
+      kind: "actor",
+      actorId: actor.id,
+      label: actor.displayName,
+    });
+  }
+
+  // Longest first so "@everybody" beats "@every…" and a full name beats a
+  // shorter one that is a prefix of it.
+  return labels.sort((left, right) => right.text.length - left.text.length);
+};
+
+// Render a message body with `@mentions` styled inline as pills, the way
+// every chat app shows addressing. Only real `@` tokens (opening a word and
+// matching a known participant or room keyword) become pills; anything else,
+// including an email's "@", stays plain text. A mention of the local user is
+// emphasized.
+const renderMessageBody = (
+  content: string,
+  labels: MentionLabel[],
+  localActorId: string | undefined,
+): ReactNode[] => {
+  const nodes: ReactNode[] = [];
+  let text = "";
+  let index = 0;
+  let key = 0;
+
+  const flush = () => {
+    if (text.length > 0) {
+      nodes.push(text);
+      text = "";
+    }
+  };
+
+  while (index < content.length) {
+    const char = content[index];
+    const boundary = index === 0 || /\s/.test(content[index - 1]);
+
+    if (char === "@" && boundary) {
+      const rest = content.slice(index + 1);
+      const lower = rest.toLowerCase();
+      const match = labels.find((label) => {
+        if (!lower.startsWith(label.text.toLowerCase())) {
+          return false;
+        }
+
+        const next = rest[label.text.length];
+        return next === undefined || !/[\w#-]/.test(next);
+      });
+
+      if (match !== undefined) {
+        flush();
+        const isYou = match.kind === "actor" && match.actorId === localActorId;
+        const raw = content.slice(index, index + 1 + match.text.length);
+        const pillText = match.kind === "room" ? raw : `@${match.label}`;
+
+        nodes.push(
+          <span
+            key={`mention-${key}`}
+            className={
+              isYou
+                ? "rounded bg-white/20 px-1 font-medium text-white"
+                : "rounded bg-white/[0.08] px-1 font-medium text-zinc-100"
+            }
+          >
+            {pillText}
+          </span>,
+        );
+        key += 1;
+        index += 1 + match.text.length;
+        continue;
+      }
+    }
+
+    text += char;
+    index += 1;
+  }
+
+  flush();
+  return nodes;
+};
 
 // Derive the structural targets from the composed text, using the roster as
 // the dictionary. The text is the single source of truth, exactly as the
@@ -723,62 +792,12 @@ function MessageActions({ onReply }: { onReply?: () => void }) {
   );
 }
 
-function AddressChips({
-  targets,
-  actors,
-  localActorId,
-}: {
-  targets: ContentAddress[];
-  actors: Map<string, Actor>;
-  localActorId: string | undefined;
-}) {
-  if (targets.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
-      <AtSign className="h-3 w-3 shrink-0 text-zinc-600" />
-      <span className="text-zinc-600">to</span>
-      {targets.map((target, index) => {
-        if (target.targetType === "room") {
-          return (
-            <span
-              key={`room-${index}`}
-              className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-medium text-zinc-400"
-            >
-              Room
-            </span>
-          );
-        }
-
-        const isYou = target.actorId === localActorId;
-        const label =
-          actors.get(target.actorId)?.displayName ??
-          actorLabel(target.actorId, actors);
-
-        return (
-          <span
-            key={`${target.actorId}-${index}`}
-            className={
-              isYou
-                ? "rounded-md border border-white/20 bg-white/[0.08] px-1.5 py-0.5 font-medium text-zinc-100"
-                : "rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-medium text-zinc-400"
-            }
-          >
-            {isYou ? "you" : `@${label}`}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
 function ChatMessage({
   actors,
   event,
   grouped,
   localActorId,
+  mentionLabels,
   repliedEvent,
   onReply,
 }: {
@@ -786,6 +805,7 @@ function ChatMessage({
   event: RoomEvent;
   grouped: boolean;
   localActorId: string | undefined;
+  mentionLabels: MentionLabel[];
   repliedEvent: RoomEvent | null;
   onReply?: () => void;
 }) {
@@ -795,7 +815,7 @@ function ChatMessage({
   const content =
     payloadString(event, "content") ?? "Message content unavailable";
   const isReply = payloadReply(event) !== null;
-  const addressedTo = payloadAddressedTo(event);
+  const body = renderMessageBody(content, mentionLabels, localActorId);
 
   if (grouped) {
     return (
@@ -806,13 +826,8 @@ function ChatMessage({
           </time>
         </div>
         <div className="min-w-0 flex-1 pr-20">
-          <AddressChips
-            targets={addressedTo}
-            actors={actors}
-            localActorId={localActorId}
-          />
           <p className="max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
-            {content}
+            {body}
           </p>
         </div>
         <MessageActions onReply={onReply} />
@@ -866,13 +881,8 @@ function ChatMessage({
             </div>
           </div>
         ) : null}
-        <AddressChips
-          targets={addressedTo}
-          actors={actors}
-          localActorId={localActorId}
-        />
         <p className="mt-1.5 max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
-          {content}
+          {body}
         </p>
       </div>
 
@@ -1598,6 +1608,8 @@ function App() {
 
     return map;
   }, [events.data]);
+  // The dictionary the message renderer matches `@mentions` against.
+  const mentionLabels = useMemo(() => buildMentionLabels(actors), [actors]);
   const ruleTitles = useMemo(
     () =>
       new Map((rules.data?.rules ?? []).map((rule) => [rule.id, rule.title])),
@@ -2583,6 +2595,7 @@ function App() {
                           event={item.event}
                           grouped={item.grouped}
                           localActorId={localActor?.id}
+                          mentionLabels={mentionLabels}
                           repliedEvent={repliedEvent}
                           onReply={
                             canReply
