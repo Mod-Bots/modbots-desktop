@@ -3,8 +3,20 @@
 
 :root {
   color-scheme: dark;
-  font-family: Inter, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-family:
+    var(
+      --modbots-ui-font,
+      "Segoe UI Variable Text",
+      "Segoe UI Variable",
+      "Segoe UI",
+      Aptos,
+      "Helvetica Neue",
+      Helvetica,
+      Arial,
+      sans-serif
+    );
   font-synthesis: none;
+  font-kerning: normal;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
