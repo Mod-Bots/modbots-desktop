@@ -47,6 +47,32 @@ export type ContentAddress =
   | { targetType: "room" }
   | { targetType: "actor"; actorId: string };
 
+export type MediaKind = "image" | "audio" | "video" | "file";
+
+export interface MediaAsset {
+  contractVersion: 1;
+  entityType: "media_asset";
+  mediaAssetId: string;
+  roomId: string;
+  ownerActorId: string;
+  mediaKind: MediaKind;
+  originalFilename: string;
+  declaredMediaType: string;
+  detectedMediaType?: string;
+  byteLength: string;
+  lifecycleState: string;
+  createdAt: string;
+}
+
+export type ContentPartInput =
+  | { kind: "text"; text: string }
+  | {
+      kind: MediaKind;
+      mediaAssetId: string;
+      caption?: string;
+      altText?: string;
+    };
+
 export interface RoomEvent {
   sequence: string;
   type: string;

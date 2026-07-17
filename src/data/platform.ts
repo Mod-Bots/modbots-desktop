@@ -4,6 +4,9 @@ import type {
   Actor,
   ActorSession,
   ContentAddress,
+  ContentPartInput,
+  MediaAsset,
+  MediaKind,
   ParticipationPolicy,
   RealtimeConfig,
   RoomEvent,
@@ -95,6 +98,15 @@ const requestJson = async <Result>(
 const apiUrl = (path: string): string =>
   new URL(path, apiBaseUrl).toString();
 
+export const mediaAssetDataUrl = (
+  roomId: string,
+  mediaAssetId: string,
+): string =>
+  apiUrl(
+    `/api/rooms/${encodeURIComponent(roomId)}/media-assets/` +
+      `${encodeURIComponent(mediaAssetId)}/data`,
+  );
+
 export const platformEndpoints = {
   api: apiBaseUrl,
   realtime: new URL(realtimeConfigUrl).origin,
@@ -185,6 +197,81 @@ export const postRoomMessage = (
     body: JSON.stringify({
       actorId,
       content,
+      ...(replyTo === undefined ? {} : { replyTo }),
+      ...(addressedTo === undefined || addressedTo.length === 0
+        ? {}
+        : { addressedTo }),
+    }),
+  });
+
+const base64 = (data: ArrayBuffer): string => {
+  const bytes = new Uint8Array(data);
+  const chunkSize = 32_768;
+  let binary = "";
+
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+
+  return btoa(binary);
+};
+
+export const postRoomMediaAsset = async (
+  roomId: string,
+  actorId: string,
+  file: File,
+): Promise<MediaAsset> => {
+  const filenameParts = file.name.split(".");
+  const extension = filenameParts[filenameParts.length - 1]?.toLowerCase() ?? "";
+  const imageExtensions = new Set(["gif", "jpeg", "jpg", "png", "webp"]);
+  const audioExtensions = new Set(["aac", "flac", "m4a", "mp3", "ogg", "wav"]);
+  const videoExtensions = new Set(["avi", "mkv", "mov", "mp4", "webm"]);
+  const mediaKind: MediaKind =
+    file.type.startsWith("image/") || imageExtensions.has(extension)
+    ? "image"
+    : file.type.startsWith("audio/") || audioExtensions.has(extension)
+      ? "audio"
+      : file.type.startsWith("video/") || videoExtensions.has(extension)
+        ? "video"
+        : "file";
+  const inferredMediaType =
+    mediaKind === "image"
+      ? `image/${extension === "jpg" ? "jpeg" : extension}`
+      : mediaKind === "audio"
+        ? `audio/${extension === "mp3" ? "mpeg" : extension}`
+        : mediaKind === "video"
+          ? `video/${extension === "mkv" ? "x-matroska" : extension}`
+          : "application/octet-stream";
+
+  return requestJson(
+    apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/media-assets`),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        actorId,
+        mediaKind,
+        originalFilename: file.name,
+        declaredMediaType: file.type || inferredMediaType,
+        data: base64(await file.arrayBuffer()),
+      }),
+    },
+  );
+};
+
+export const postRoomContent = (
+  roomId: string,
+  actorId: string,
+  parts: ContentPartInput[],
+  replyTo?: { contentItemId: string },
+  addressedTo?: ContentAddress[],
+): Promise<{ contentItem: unknown; event: RoomEvent }> =>
+  requestJson(apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/content`), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      actorId,
+      parts,
       ...(replyTo === undefined ? {} : { replyTo }),
       ...(addressedTo === undefined || addressedTo.length === 0
         ? {}

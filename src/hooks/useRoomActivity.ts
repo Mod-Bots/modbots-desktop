@@ -28,6 +28,8 @@ import {
   getRoomOverview,
   joinAsGuest,
   PlatformRequestError,
+  postRoomContent,
+  postRoomMediaAsset,
   postRoomMessage,
   setRoomPresence,
   setSessionToken,
@@ -220,6 +222,48 @@ export const useRoomActivity = (roomId: string) => {
       void queryClient.invalidateQueries({ queryKey: overviewKey });
     },
   });
+  const sendContent = useMutation({
+    mutationFn: async (message: {
+      content: string;
+      file: File;
+      replyTo?: { contentItemId: string };
+      addressedTo?: ContentAddress[];
+    }) => {
+      if (localActor === undefined) {
+        throw new Error("Join the room before sending content.");
+      }
+
+      const asset = await postRoomMediaAsset(
+        roomId,
+        localActor.id,
+        message.file,
+      );
+      const parts = [
+        ...(message.content.length === 0
+          ? []
+          : [{ kind: "text" as const, text: message.content }]),
+        {
+          kind: asset.mediaKind,
+          mediaAssetId: asset.mediaAssetId,
+          caption: message.file.name,
+        },
+      ];
+
+      return postRoomContent(
+        roomId,
+        localActor.id,
+        parts,
+        message.replyTo,
+        message.addressedTo,
+      );
+    },
+    onSuccess: ({ event }) => {
+      queryClient.setQueryData<RoomEvent[]>(eventsKey, (existing) =>
+        mergeEvents(existing, [event]),
+      );
+      void queryClient.invalidateQueries({ queryKey: overviewKey });
+    },
+  });
   // The explicit step through the room door: presence joins only when the
   // person chooses to enter from the start screen.
   const enterRoom = async (): Promise<void> => {
@@ -245,6 +289,7 @@ export const useRoomActivity = (roomId: string) => {
     setIdentity(null);
     join.reset();
     sendMessage.reset();
+    sendContent.reset();
     queryClient.removeQueries({ queryKey: ["desktop-session"] });
   };
 
@@ -414,6 +459,7 @@ export const useRoomActivity = (roomId: string) => {
     realtimeStatus,
     refresh,
     sendMessage,
+    sendContent,
     signOut,
   };
 };

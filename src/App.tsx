@@ -46,7 +46,7 @@ import type {
   BrowserLoginOutcome,
   BrowserLoginSession,
 } from "./data/oauth";
-import { isMutedError } from "./data/platform";
+import { isMutedError, mediaAssetDataUrl } from "./data/platform";
 import { actorLabel, actorRole } from "./data/room-state";
 import { useRoomActivity } from "./hooks/useRoomActivity";
 import "./App.css";
@@ -91,6 +91,88 @@ const roleOrder: ActorType[] = ["mod_bot", "chat_bot", "human"];
 const payloadString = (event: RoomEvent, key: string): string | null => {
   const value = event.payload[key];
   return typeof value === "string" ? value : null;
+};
+
+interface EventAssetPart {
+  partId: string;
+  kind: "image" | "audio" | "video" | "file";
+  mediaAssetId: string;
+  caption: string | null;
+}
+
+type EventContentPart =
+  | { partId: string; kind: "text"; text: string }
+  | EventAssetPart;
+
+const contentParts = (event: RoomEvent): EventContentPart[] => {
+  const raw = event.payload.parts;
+
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const parts: EventContentPart[] = [];
+
+  for (const value of raw) {
+    if (typeof value !== "object" || value === null) {
+      continue;
+    }
+
+    const part = value as Record<string, unknown>;
+
+    if (typeof part.partId !== "string" || typeof part.kind !== "string") {
+      continue;
+    }
+
+    if (part.kind === "text" && typeof part.text === "string") {
+      parts.push({ partId: part.partId, kind: "text", text: part.text });
+      continue;
+    }
+
+    if (
+      (part.kind === "image" ||
+        part.kind === "audio" ||
+        part.kind === "video" ||
+        part.kind === "file") &&
+      typeof part.mediaAssetId === "string"
+    ) {
+      parts.push({
+        partId: part.partId,
+        kind: part.kind,
+        mediaAssetId: part.mediaAssetId,
+        caption: typeof part.caption === "string" ? part.caption : null,
+      });
+    }
+  }
+
+  return parts;
+};
+
+const eventText = (event: RoomEvent): string => {
+  const legacy = payloadString(event, "content");
+
+  if (legacy !== null) {
+    return legacy;
+  }
+
+  const parts = contentParts(event);
+  return parts
+    .filter((part) => part.kind === "text")
+    .map((part) => part.text)
+    .join("\n");
+};
+
+const eventContent = (event: RoomEvent): string => {
+  const text = eventText(event);
+
+  if (text.length > 0) {
+    return text;
+  }
+
+  return contentParts(event)
+    .filter((part): part is EventAssetPart => part.kind !== "text")
+    .map((part) => part.caption ?? `Shared ${part.kind}`)
+    .join("\n");
 };
 
 const payloadReply = (event: RoomEvent): { contentItemId: string } | null => {
@@ -792,6 +874,90 @@ function MessageActions({ onReply }: { onReply?: () => void }) {
   );
 }
 
+function MessageMedia({ event }: { event: RoomEvent }) {
+  const parts = contentParts(event).filter(
+    (part): part is EventAssetPart => part.kind !== "text",
+  );
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 flex max-w-[720px] flex-col gap-2">
+      {parts.map((part) => {
+        const url = mediaAssetDataUrl(roomId, part.mediaAssetId);
+
+        if (part.kind === "image") {
+          return (
+            <figure key={part.partId}>
+              <img
+                src={url}
+                alt={part.caption ?? "Shared image"}
+                className="max-h-[460px] max-w-full rounded-xl border border-white/10 object-contain"
+              />
+              {part.caption !== null ? (
+                <figcaption className="mt-1 text-xs text-zinc-500">
+                  {part.caption}
+                </figcaption>
+              ) : null}
+            </figure>
+          );
+        }
+
+        if (part.kind === "video") {
+          return (
+            <figure key={part.partId}>
+              <video
+                controls
+                preload="metadata"
+                src={url}
+                className="max-h-[460px] max-w-full rounded-xl border border-white/10"
+              />
+              {part.caption !== null ? (
+                <figcaption className="mt-1 text-xs text-zinc-500">
+                  {part.caption}
+                </figcaption>
+              ) : null}
+            </figure>
+          );
+        }
+
+        if (part.kind === "audio") {
+          return (
+            <figure key={part.partId}>
+              <audio
+                controls
+                preload="metadata"
+                src={url}
+                className="w-full max-w-xl"
+              />
+              {part.caption !== null ? (
+                <figcaption className="mt-1 text-xs text-zinc-500">
+                  {part.caption}
+                </figcaption>
+              ) : null}
+            </figure>
+          );
+        }
+
+        return (
+          <a
+            key={part.partId}
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="flex max-w-xl items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-300 hover:bg-white/[0.07] hover:text-white"
+          >
+            <Paperclip className="h-4 w-4" />
+            <span>{part.caption ?? "Open shared file"}</span>
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 function ChatMessage({
   actors,
   event,
@@ -812,8 +978,7 @@ function ChatMessage({
   const actor = event.actorId === null ? undefined : actors.get(event.actorId);
   const ownMessage = event.actorId === localActorId;
   const name = actorLabel(event.actorId, actors);
-  const content =
-    payloadString(event, "content") ?? "Message content unavailable";
+  const content = eventText(event);
   const isReply = payloadReply(event) !== null;
   const body = renderMessageBody(content, mentionLabels, localActorId);
 
@@ -826,9 +991,12 @@ function ChatMessage({
           </time>
         </div>
         <div className="min-w-0 flex-1 pr-20">
-          <p className="max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
-            {body}
-          </p>
+          {content.length > 0 ? (
+            <p className="max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
+              {body}
+            </p>
+          ) : null}
+          <MessageMedia event={event} />
         </div>
         <MessageActions onReply={onReply} />
       </article>
@@ -874,16 +1042,19 @@ function ChatMessage({
                     {actorLabel(repliedEvent.actorId, actors)}
                   </p>
                   <p className="mt-0.5 truncate text-[11px] leading-5 text-zinc-500">
-                    {payloadString(repliedEvent, "content")}
+                    {eventContent(repliedEvent)}
                   </p>
                 </>
               )}
             </div>
           </div>
         ) : null}
-        <p className="mt-1.5 max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
-          {body}
-        </p>
+        {content.length > 0 ? (
+          <p className="mt-1.5 max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
+            {body}
+          </p>
+        ) : null}
+        <MessageMedia event={event} />
       </div>
 
       <MessageActions onReply={onReply} />
@@ -1423,10 +1594,13 @@ function App() {
     realtimeStatus,
     rules,
     refresh,
+    sendContent,
     sendMessage,
     signOut,
   } = useRoomActivity(roomId);
   const [draft, setDraft] = useState("");
+  const [attachment, setAttachment] = useState<File | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [mutedNotice, setMutedNotice] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(true);
   const [aboutPanelOpen, setAboutPanelOpen] = useState(true);
@@ -1465,6 +1639,7 @@ function App() {
   const presenceJoinedAs = useRef<string | null>(null);
   const conversationViewport = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const attachmentInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const apiConnected = apiHealth.data?.status === "ok";
   const chatBotCount = onlineActorIds.filter(
@@ -1574,6 +1749,7 @@ function App() {
       .filter(
         (event) =>
           event.type === "message_posted" ||
+          event.type === "content_posted" ||
           event.type === "moderation_action_applied",
       )
       .filter((event) => {
@@ -1582,8 +1758,7 @@ function App() {
         }
 
         return (
-          payloadString(event, "content")?.toLocaleLowerCase().includes(query) ??
-          false
+          eventContent(event).toLocaleLowerCase().includes(query)
         );
       })
       .slice(-300);
@@ -1595,7 +1770,7 @@ function App() {
     const map = new Map<string, RoomEvent>();
 
     for (const event of events.data ?? []) {
-      if (event.type !== "message_posted") {
+      if (event.type !== "message_posted" && event.type !== "content_posted") {
         continue;
       }
 
@@ -1988,9 +2163,11 @@ function App() {
   const canSend =
     localActor !== undefined &&
     apiConnected &&
-    draft.trim().length > 0 &&
-    !sendMessage.isPending;
-  const sendError = isMutedError(sendMessage.error) ? null : sendMessage.error;
+    (draft.trim().length > 0 || attachment !== null) &&
+    !sendMessage.isPending &&
+    !sendContent.isPending;
+  const mutationError = sendMessage.error ?? sendContent.error;
+  const sendError = isMutedError(mutationError) ? null : mutationError;
   const error =
     apiHealth.error ??
     desktopSession.error ??
@@ -2180,7 +2357,7 @@ function App() {
     event.preventDefault();
     const content = draft.trim();
 
-    if (!canSend || content.length === 0) {
+    if (!canSend) {
       return;
     }
 
@@ -2194,13 +2371,23 @@ function App() {
     const addressedTo = deriveAddressedTo(content, addressableParticipants);
 
     try {
-      await sendMessage.mutateAsync({
-        content,
+      const addressing = {
         ...(replyContentItemId === null
           ? {}
           : { replyTo: { contentItemId: replyContentItemId } }),
         ...(addressedTo.length === 0 ? {} : { addressedTo }),
-      });
+      };
+
+      if (attachment === null) {
+        await sendMessage.mutateAsync({ content, ...addressing });
+      } else {
+        await sendContent.mutateAsync({
+          content,
+          file: attachment,
+          ...addressing,
+        });
+        setAttachment(null);
+      }
       setReplyTarget(null);
     } catch (sendFailure) {
       setDraft(content);
@@ -2610,6 +2797,20 @@ function App() {
               </div>
 
               <div className="shrink-0 px-4 pb-4 pt-2 sm:px-7 sm:pb-5">
+                {attachmentError !== null ? (
+                  <div className="mb-2 flex items-center gap-2 rounded-xl border border-white/10 bg-[#151515] px-3 py-2 text-xs text-zinc-300">
+                    <CircleAlert className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                    <span className="flex-1">{attachmentError}</span>
+                    <button
+                      type="button"
+                      onClick={() => setAttachmentError(null)}
+                      className="rounded-md p-1 text-zinc-500 hover:bg-white/[0.06] hover:text-white"
+                      aria-label="Dismiss attachment error"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : null}
                 {mutedNotice !== null ? (
                   <div className="mb-2 flex items-center gap-2 rounded-xl border border-white/10 bg-[#151515] px-3 py-2 text-xs text-zinc-300">
                     <MicOff className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
@@ -2699,7 +2900,7 @@ function App() {
                         </span>
                       </span>
                       <span className="min-w-0 flex-1 truncate text-zinc-600">
-                        {payloadString(replyTarget, "content")}
+                        {eventContent(replyTarget)}
                       </span>
                       <button
                         type="button"
@@ -2711,6 +2912,43 @@ function App() {
                       </button>
                     </div>
                   ) : null}
+                  {attachment !== null ? (
+                    <div className="mx-3 mt-2 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-zinc-300">
+                      <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">
+                        {attachment.name}
+                      </span>
+                      <span className="text-zinc-500">
+                        {(attachment.size / 1_048_576).toFixed(1)} MB
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setAttachment(null)}
+                        className="rounded-md p-1 text-zinc-500 hover:bg-white/[0.06] hover:text-white"
+                        aria-label="Remove attachment"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : null}
+                  <input
+                    ref={attachmentInput}
+                    type="file"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0] ?? null;
+
+                      if (file !== null && file.size > 100 * 1024 * 1024) {
+                        setAttachment(null);
+                        setAttachmentError("Attachments cannot exceed 100 MB.");
+                      } else {
+                        setAttachment(file);
+                        setAttachmentError(null);
+                      }
+
+                      event.currentTarget.value = "";
+                    }}
+                  />
                   <textarea
                     ref={composerRef}
                     value={draft}
@@ -2744,28 +2982,46 @@ function App() {
                     <div className="flex items-center gap-0.5">
                       <button
                         type="button"
-                        disabled
+                        disabled={!apiConnected || localActor === undefined}
+                        onClick={() => {
+                          if (attachmentInput.current !== null) {
+                            attachmentInput.current.accept = "";
+                            attachmentInput.current.click();
+                          }
+                        }}
                         className="rounded-lg p-2.5 text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-200 disabled:cursor-not-allowed"
                         aria-label="Add files or media"
-                        title="File and media upload is not connected yet"
+                        title="Add a file, image, audio, or video"
                       >
                         <Paperclip className="h-[18px] w-[18px]" />
                       </button>
                       <button
                         type="button"
-                        disabled
+                        disabled={!apiConnected || localActor === undefined}
+                        onClick={() => {
+                          if (attachmentInput.current !== null) {
+                            attachmentInput.current.accept = "image/*";
+                            attachmentInput.current.click();
+                          }
+                        }}
                         className="rounded-lg p-2.5 text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-200 disabled:cursor-not-allowed"
                         aria-label="Add image"
-                        title="Image upload is not connected yet"
+                        title="Add an image"
                       >
                         <Image className="h-[18px] w-[18px]" />
                       </button>
                       <button
                         type="button"
-                        disabled
+                        disabled={!apiConnected || localActor === undefined}
+                        onClick={() => {
+                          if (attachmentInput.current !== null) {
+                            attachmentInput.current.accept = "audio/*";
+                            attachmentInput.current.click();
+                          }
+                        }}
                         className="rounded-lg p-2.5 text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-200 disabled:cursor-not-allowed"
                         aria-label="Record voice message"
-                        title="Voice messages are not connected yet"
+                        title="Add an audio recording"
                       >
                         <Mic className="h-[18px] w-[18px]" />
                       </button>
@@ -2845,7 +3101,7 @@ function App() {
                 </p>
                 <p className="flex items-start gap-2.5">
                   <Image className="mt-0.5 h-4 w-4 shrink-0 text-zinc-500" />
-                  <span>Text today; images, files, and voice planned</span>
+                  <span>Text, images, audio, video, and files</span>
                 </p>
               </div>
 
@@ -3094,7 +3350,7 @@ function App() {
       {entered ? (
         <StatusBar
           connectionLabel={connectionLabel}
-          sending={sendMessage.isPending}
+          sending={sendMessage.isPending || sendContent.isPending}
           muted={isMuted}
           searchMatches={
             searchQuery.trim().length > 0 ? roomEvents.length : null
@@ -3123,8 +3379,8 @@ function App() {
               </div>
             </div>
             <p className="mt-4 text-sm leading-6 text-zinc-400">
-              A moderated multimodal chat room for teaching moderation bots from
-              live chat activity. This is the desktop client track.
+              A multimodal chatroom where humans and chat bots talk, and mod
+              bots learn to moderate from everything that happens.
             </p>
             <button
               type="button"
