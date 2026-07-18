@@ -6,6 +6,7 @@ import type {
   ReactNode,
 } from "react";
 import startScreenBg from "./assets/start-screen-bg.png";
+import appLogo from "./assets/logo.svg";
 import {
   ArrowRight,
   Bot,
@@ -1477,9 +1478,11 @@ function StartScreen({
       />
       <div className="relative mx-auto flex w-full max-w-[420px] flex-col justify-center px-6 py-12">
         <div className="text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-white/10 bg-[#171717]">
-            <Bot className="h-6 w-6 text-zinc-200" />
-          </div>
+          <img
+            src={appLogo}
+            alt=""
+            className="mx-auto h-12 w-12 rounded-lg shadow-[0_8px_24px_rgba(0,143,255,0.2)]"
+          />
           <h1 className="mt-5 text-[26px] font-semibold tracking-tight text-white">
             Mod Bots
           </h1>
@@ -3368,9 +3371,11 @@ function App() {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-white text-sm font-bold text-black">
-                MB
-              </div>
+              <img
+                src={appLogo}
+                alt=""
+                className="h-11 w-11 rounded-xl"
+              />
               <div>
                 <p className="text-sm font-semibold text-white">
                   Mod Bots Desktop
