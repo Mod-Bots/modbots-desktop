@@ -1641,6 +1641,8 @@ function App() {
   const [entered, setEntered] = useState(false);
   const presenceJoinedAs = useRef<string | null>(null);
   const conversationViewport = useRef<HTMLDivElement>(null);
+  const conversationPositioned = useRef(false);
+  const followLatestMessage = useRef(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -1763,8 +1765,7 @@ function App() {
         return (
           eventContent(event).toLocaleLowerCase().includes(query)
         );
-      })
-      .slice(-300);
+      });
   }, [events.data, searchQuery]);
   const timeline = useMemo(() => buildTimeline(roomEvents), [roomEvents]);
   // Replies reference the content item behind a message; this resolves the
@@ -2193,7 +2194,20 @@ function App() {
 
     if (viewport !== null) {
       viewport.scrollTop = viewport.scrollHeight;
+      followLatestMessage.current = true;
     }
+  };
+
+  const handleConversationScroll = () => {
+    const viewport = conversationViewport.current;
+
+    if (viewport === null) {
+      return;
+    }
+
+    const distanceFromLatest =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    followLatestMessage.current = distanceFromLatest <= 48;
   };
 
   const menus: MenuSpec[] = [
@@ -2294,12 +2308,20 @@ function App() {
   ];
 
   useEffect(() => {
-    if (searchQuery.length > 0) {
+    conversationPositioned.current = false;
+    followLatestMessage.current = true;
+  }, [entered, roomId]);
+
+  useEffect(() => {
+    if (!entered || searchQuery.length > 0) {
       return;
     }
 
-    scrollToLatest();
-  }, [timeline.length, searchQuery]);
+    if (!conversationPositioned.current || followLatestMessage.current) {
+      scrollToLatest();
+      conversationPositioned.current = true;
+    }
+  }, [entered, timeline.length, searchQuery]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2724,6 +2746,7 @@ function App() {
             <section className="flex min-w-0 flex-1 flex-col">
               <div
                 ref={conversationViewport}
+                onScroll={handleConversationScroll}
                 className="modbots-scroll min-h-0 flex-1 overflow-y-auto"
               >
                 <div className="flex min-h-full flex-col justify-end py-3">
