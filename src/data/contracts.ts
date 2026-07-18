@@ -101,6 +101,10 @@ export interface RoomOverview {
   };
 }
 
+export interface RoomRoster {
+  actors: Actor[];
+}
+
 export interface ServiceHealth {
   status: string;
   service: string;

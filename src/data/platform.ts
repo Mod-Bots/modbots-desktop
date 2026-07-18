@@ -11,6 +11,7 @@ import type {
   RealtimeConfig,
   RoomEvent,
   RoomOverview,
+  RoomRoster,
   RoomRules,
   ServiceHealth,
 } from "./contracts";
@@ -123,6 +124,9 @@ export const getRealtimeConfig = (): Promise<RealtimeConfig> =>
 
 export const getRoomOverview = (roomId: string): Promise<RoomOverview> =>
   requestJson(apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/overview`));
+
+export const getRoomRoster = (roomId: string): Promise<RoomRoster> =>
+  requestJson(apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/roster`));
 
 export const getActor = (actorId: string): Promise<Actor> =>
   requestJson(apiUrl(`/api/actors/${encodeURIComponent(actorId)}`));

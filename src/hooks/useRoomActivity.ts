@@ -26,6 +26,7 @@ import {
   getRealtimeHealth,
   getRoomEvents,
   getRoomOverview,
+  getRoomRoster,
   joinAsGuest,
   PlatformRequestError,
   postRoomContent,
@@ -80,6 +81,10 @@ export const useRoomActivity = (roomId: string) => {
     () => ["room-overview", roomId] as const,
     [roomId],
   );
+  const rosterKey = useMemo(
+    () => ["room-roster", roomId] as const,
+    [roomId],
+  );
 
   const apiHealth = useQuery({
     queryKey: ["api-health"],
@@ -96,6 +101,11 @@ export const useRoomActivity = (roomId: string) => {
   const overview = useQuery({
     queryKey: overviewKey,
     queryFn: () => getRoomOverview(roomId),
+    retry: 1,
+  });
+  const roster = useQuery({
+    queryKey: rosterKey,
+    queryFn: () => getRoomRoster(roomId),
     retry: 1,
   });
   const events = useQuery({
@@ -177,6 +187,10 @@ export const useRoomActivity = (roomId: string) => {
 
       saveStoredIdentity(stored);
       setSessionToken(stored.token);
+      queryClient.setQueryData(
+        ["desktop-session", roomId, outcome.actor.id],
+        outcome.actor,
+      );
       return stored;
     },
     onSuccess: (stored) => {
@@ -195,6 +209,10 @@ export const useRoomActivity = (roomId: string) => {
 
     saveStoredIdentity(stored);
     setSessionToken(stored.token);
+    queryClient.setQueryData(
+      ["desktop-session", roomId, outcome.actor.id],
+      outcome.actor,
+    );
     setIdentity(stored);
   };
   const sendMessage = useMutation({
@@ -262,6 +280,7 @@ export const useRoomActivity = (roomId: string) => {
         mergeEvents(existing, [event]),
       );
       void queryClient.invalidateQueries({ queryKey: overviewKey });
+      void queryClient.invalidateQueries({ queryKey: rosterKey });
     },
   });
   // The explicit step through the room door: presence joins only when the
@@ -269,6 +288,10 @@ export const useRoomActivity = (roomId: string) => {
   const enterRoom = async (): Promise<void> => {
     if (localActor !== undefined) {
       await setRoomPresence(roomId, localActor.id, "joined");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: overviewKey }),
+        queryClient.invalidateQueries({ queryKey: rosterKey }),
+      ]);
     }
   };
 
@@ -278,6 +301,10 @@ export const useRoomActivity = (roomId: string) => {
     if (actorId !== null) {
       try {
         await setRoomPresence(roomId, actorId, "left");
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: overviewKey }),
+          queryClient.invalidateQueries({ queryKey: rosterKey }),
+        ]);
       } catch {
         // Signing out clears the local identity even when the room presence
         // update cannot be delivered.
@@ -306,8 +333,12 @@ export const useRoomActivity = (roomId: string) => {
       ids.add(localActor.id);
     }
 
+    for (const actor of roster.data?.actors ?? []) {
+      ids.add(actor.id);
+    }
+
     return [...ids].sort();
-  }, [localActor, events.data]);
+  }, [localActor, events.data, roster.data]);
   const actorQueries = useQueries({
     queries: actorIds.map((actorId) => ({
       queryKey: ["actor", actorId],
@@ -329,9 +360,13 @@ export const useRoomActivity = (roomId: string) => {
         actorMap.set(localActor.id, localActor);
       }
 
+      for (const actor of roster.data?.actors ?? []) {
+        actorMap.set(actor.id, actor);
+      }
+
       return actorMap;
     },
-    [actorQueries, localActor],
+    [actorQueries, localActor, roster.data],
   );
 
   useEffect(() => {
@@ -430,16 +465,20 @@ export const useRoomActivity = (roomId: string) => {
 
     void connect();
     return () => controller.abort();
-  }, [eventsKey, overviewKey, queryClient, roomId]);
+  }, [eventsKey, overviewKey, queryClient, roomId, rosterKey]);
 
   const refresh = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["api-health"] }),
       queryClient.invalidateQueries({ queryKey: ["realtime-health"] }),
       queryClient.invalidateQueries({ queryKey: overviewKey }),
+      queryClient.invalidateQueries({ queryKey: rosterKey }),
       queryClient.invalidateQueries({ queryKey: eventsKey }),
     ]);
   };
+  const currentOnlineActorIds =
+    roster.data?.actors.map((actor) => actor.id) ??
+    onlineActorIds(events.data ?? []);
 
   return {
     actors,
@@ -451,7 +490,7 @@ export const useRoomActivity = (roomId: string) => {
     hasIdentity: identity !== null,
     join,
     localActor,
-    onlineActorIds: onlineActorIds(events.data ?? []),
+    onlineActorIds: currentOnlineActorIds,
     overview,
     policy,
     realtimeHealth,
