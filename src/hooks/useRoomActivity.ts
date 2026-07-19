@@ -48,7 +48,7 @@ export interface JoinRequest {
 const reconnectDelayMilliseconds = 1_000;
 const roomHistoryRetryDelayMilliseconds = 2_000;
 const maximumRoomHistoryRetries = 7;
-const maximumRoomHistoryRetryDelayMilliseconds = 60_000;
+const maximumRoomHistoryRetryDelayMilliseconds = 59_000;
 
 const roomHistoryRetryDelay = (attempt: number): number =>
   Math.min(
@@ -125,7 +125,7 @@ export const useRoomActivity = (roomId: string) => {
       return mergeEvents(existing, persisted);
     },
     // The desktop can start before the API. Give a Docker-backed service more
-    // than three minutes to become ready, then stop retrying and let the
+    // up to three minutes to become ready, then stop retrying and let the
     // interface show a clear unavailable state with an explicit Retry action.
     retry: maximumRoomHistoryRetries,
     retryDelay: roomHistoryRetryDelay,
