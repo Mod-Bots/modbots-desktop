@@ -2202,6 +2202,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-upload",
  "tauri-plugin-window-state",
+ "webview2-com",
 ]
 
 [[package]]

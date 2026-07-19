@@ -1,7 +1,21 @@
 use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
-use std::net::TcpListener;
+
+#[cfg(windows)]
+use tauri::Manager;
+#[cfg(windows)]
+use webview2_com::{
+    Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ProcessFailedEventArgs, COREWEBVIEW2_PROCESS_FAILED_KIND,
+    },
+    ProcessFailedEventHandler,
+};
+
+#[cfg(windows)]
+static WEBVIEW_RECOVERY_STARTED: AtomicBool = AtomicBool::new(false);
 
 struct PendingLoginCallback {
     cancel: mpsc::Sender<()>,
@@ -122,6 +136,62 @@ fn cancel_login_callback(state: tauri::State<'_, LoginCallbackState>) -> Result<
     Ok(())
 }
 
+#[cfg(windows)]
+fn webview_process_failed_kind(args: Option<ICoreWebView2ProcessFailedEventArgs>) -> i32 {
+    let Some(args) = args else {
+        return -1;
+    };
+
+    let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
+    match unsafe { args.ProcessFailedKind(&mut kind) } {
+        Ok(()) => kind.0,
+        Err(_) => -1,
+    }
+}
+
+#[cfg(windows)]
+fn attach_webview_process_recovery(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("WebView2 recovery was not attached: main window was not found.");
+        return;
+    };
+
+    let app_handle = app.handle().clone();
+    let recovery_window = window.clone();
+
+    if let Err(error) = window.with_webview(move |webview| {
+        let app_handle = app_handle.clone();
+        let recovery_window = recovery_window.clone();
+        let controller = webview.controller();
+        let core_webview = match unsafe { controller.CoreWebView2() } {
+            Ok(core_webview) => core_webview,
+            Err(error) => {
+                eprintln!("WebView2 recovery was not attached: {error}");
+                return;
+            }
+        };
+
+        let handler = ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
+            let kind = webview_process_failed_kind(args);
+            eprintln!("WebView2 process failed, restarting Mod Bots. kind={kind}");
+
+            if !WEBVIEW_RECOVERY_STARTED.swap(true, Ordering::SeqCst) {
+                let _ = recovery_window.hide();
+                app_handle.request_restart();
+            }
+
+            Ok(())
+        }));
+
+        let mut token = 0;
+        if let Err(error) = unsafe { core_webview.add_ProcessFailed(&handler, &mut token) } {
+            eprintln!("WebView2 recovery was not attached: {error}");
+        }
+    }) {
+        eprintln!("WebView2 recovery was not attached: {error}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -134,6 +204,12 @@ pub fn run() {
         .plugin(tauri_plugin_upload::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(LoginCallbackState::default())
+        .setup(|app| {
+            #[cfg(windows)]
+            attach_webview_process_recovery(app);
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             await_login_callback,
             cancel_login_callback
