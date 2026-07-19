@@ -59,7 +59,7 @@ const roomAbout =
   "to moderate from everything that happens.";
 const appVersion = "0.0.1-alpha";
 
-const groupWindowMs = 3 * 60 * 1000;
+const groupWindowMs = 45 * 1000;
 const browserLoginWaitMs = 90_000;
 const participantActiveWindowMs = 5 * 60 * 1000;
 
@@ -405,6 +405,8 @@ const dayLabel = (date: Date): string => {
     day: "numeric",
   }).format(date);
 };
+
+const formatRole = (actor: Actor): string => actor.type.replace("_", " ");
 
 const isVisibleParticipant = (actor: Actor): boolean =>
   actor.type !== "human" || actor.policyAcceptedAt !== null;
@@ -983,7 +985,7 @@ function ChatMessage({
 
   if (grouped) {
     return (
-      <article className="group relative flex gap-2.5 px-4 py-0.5 hover:bg-white/[0.03] sm:px-6">
+      <article className="group relative flex gap-3 px-4 py-1 hover:bg-white/[0.03] sm:px-6">
         <div className="flex w-8 shrink-0 justify-center">
           <time className="mt-1 hidden text-[10px] tabular-nums text-zinc-600 group-hover:block">
             {formatTime(event.occurredAt)}
@@ -991,7 +993,7 @@ function ChatMessage({
         </div>
         <div className="min-w-0 flex-1 pr-20">
           {content.length > 0 ? (
-            <p className="max-w-[78ch] whitespace-pre-wrap break-words text-[14px] leading-[21px] text-zinc-200">
+            <p className="max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
               {body}
             </p>
           ) : null}
@@ -1003,14 +1005,19 @@ function ChatMessage({
   }
 
   return (
-    <article className="group relative mt-3 flex gap-2.5 px-4 py-0.5 hover:bg-white/[0.03] sm:px-6">
+    <article className="group relative mt-5 flex gap-3 px-4 py-1 hover:bg-white/[0.03] sm:px-6">
       <div className="w-8 shrink-0">
         <ActorProfilePicture actor={actor} actorId={event.actorId} name={name} size="sm" />
       </div>
 
       <div className="min-w-0 flex-1 pr-20">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          <span className="text-[13px] font-semibold text-zinc-100">{name}</span>
+          <span className="text-[12px] font-semibold text-zinc-100">{name}</span>
+          {actor?.type !== "human" && actor !== undefined ? (
+            <span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-zinc-400">
+              {formatRole(actor)}
+            </span>
+          ) : null}
           {ownMessage ? (
             <span className="text-[11px] text-zinc-500">You</span>
           ) : null}
@@ -1044,7 +1051,7 @@ function ChatMessage({
           </div>
         ) : null}
         {content.length > 0 ? (
-          <p className="mt-1 max-w-[78ch] whitespace-pre-wrap break-words text-[14px] leading-[21px] text-zinc-200">
+          <p className="mt-1.5 max-w-[76ch] whitespace-pre-wrap break-words text-[13px] leading-[22px] text-zinc-200">
             {body}
           </p>
         ) : null}
