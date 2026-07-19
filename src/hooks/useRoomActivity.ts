@@ -47,6 +47,14 @@ export interface JoinRequest {
 
 const reconnectDelayMilliseconds = 1_000;
 const roomHistoryRetryDelayMilliseconds = 2_000;
+const maximumRoomHistoryRetries = 5;
+const maximumRoomHistoryRetryDelayMilliseconds = 30_000;
+
+const roomHistoryRetryDelay = (attempt: number): number =>
+  Math.min(
+    roomHistoryRetryDelayMilliseconds * 2 ** attempt,
+    maximumRoomHistoryRetryDelayMilliseconds,
+  );
 
 const restoreIdentity = (): StoredIdentity | null => {
   const identity = loadStoredIdentity();
@@ -116,11 +124,11 @@ export const useRoomActivity = (roomId: string) => {
       const existing = queryClient.getQueryData<RoomEvent[]>(eventsKey);
       return mergeEvents(existing, persisted);
     },
-    // The desktop can start before the API. Keep fetching the persisted
-    // history until it is available so later realtime events cannot leave the
-    // conversation showing only the events that happened after launch.
-    retry: true,
-    retryDelay: roomHistoryRetryDelayMilliseconds,
+    // The desktop can start before the API. Give the backend a full minute to
+    // become ready, then stop retrying and let the interface show a clear
+    // unavailable state with an explicit Retry action.
+    retry: maximumRoomHistoryRetries,
+    retryDelay: roomHistoryRetryDelay,
   });
   const policy = useQuery({
     queryKey: ["participation-policy"],

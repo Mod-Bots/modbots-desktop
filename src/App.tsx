@@ -2178,6 +2178,7 @@ function App() {
     overview.error ??
     events.error ??
     sendError;
+  const historyUnavailable = events.isError;
   const realtimeConnected = realtimeStatus.state === "connected";
   const connectionProblem = !apiConnected || !realtimeConnected;
   const connectionLabel =
@@ -2728,7 +2729,9 @@ function App() {
           {connectionProblem || error instanceof Error ? (
             <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] bg-[#151515] px-7 py-2 text-xs text-zinc-300">
               <span>
-                {error instanceof Error
+                {historyUnavailable
+                  ? "We couldn't load the conversation right now. Try again in a moment."
+                  : error instanceof Error
                   ? error.message
                   : "The conversation is reconnecting. New messages may be delayed."}
               </span>
@@ -2766,12 +2769,16 @@ function App() {
                       <h2 className="mt-4 text-base font-semibold text-zinc-200">
                         {searchQuery.length > 0
                           ? "No matching messages"
-                          : "Start the conversation"}
+                          : historyUnavailable
+                            ? "We couldn't load the conversation"
+                            : "Start the conversation"}
                       </h2>
                       <p className="mt-1 text-sm text-zinc-500">
                         {searchQuery.length > 0
                           ? "Try another word or phrase."
-                          : "Messages from people and bots appear here together."}
+                          : historyUnavailable
+                            ? "Try again in a moment."
+                            : "Messages from people and bots appear here together."}
                       </p>
                     </div>
                   ) : (
