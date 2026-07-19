@@ -46,6 +46,7 @@ export interface JoinRequest {
 }
 
 const reconnectDelayMilliseconds = 1_000;
+const roomHistoryRetryDelayMilliseconds = 2_000;
 
 const restoreIdentity = (): StoredIdentity | null => {
   const identity = loadStoredIdentity();
@@ -115,7 +116,11 @@ export const useRoomActivity = (roomId: string) => {
       const existing = queryClient.getQueryData<RoomEvent[]>(eventsKey);
       return mergeEvents(existing, persisted);
     },
-    retry: 1,
+    // The desktop can start before the API. Keep fetching the persisted
+    // history until it is available so later realtime events cannot leave the
+    // conversation showing only the events that happened after launch.
+    retry: true,
+    retryDelay: roomHistoryRetryDelayMilliseconds,
   });
   const policy = useQuery({
     queryKey: ["participation-policy"],
