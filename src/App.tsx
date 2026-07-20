@@ -50,6 +50,7 @@ import type {
 import { isMutedError, mediaAssetDataUrl } from "./data/platform";
 import { actorLabel, actorRole } from "./data/room-state";
 import { useRoomActivity } from "./hooks/useRoomActivity";
+import { ModelSetupScreen } from "./ModelSetupScreen";
 import "./App.css";
 
 const roomId = "global-lobby";
@@ -1639,6 +1640,7 @@ function App() {
   // Entering the room is an explicit act every launch: nothing inside the
   // room renders until the person finishes the browser-side sign-in flow.
   const [entered, setEntered] = useState(false);
+  const [inferenceReady, setInferenceReady] = useState(false);
   const presenceJoinedAs = useRef<string | null>(null);
   const conversationViewport = useRef<HTMLDivElement>(null);
   const conversationPositioned = useRef(false);
@@ -2314,7 +2316,7 @@ function App() {
   }, [entered, roomId]);
 
   useEffect(() => {
-    if (!entered || searchQuery.length > 0) {
+    if (!entered || !inferenceReady || searchQuery.length > 0) {
       return;
     }
 
@@ -2322,7 +2324,7 @@ function App() {
       scrollToLatest();
       conversationPositioned.current = true;
     }
-  }, [entered, timeline.length, searchQuery]);
+  }, [entered, inferenceReady, timeline.length, searchQuery]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2348,6 +2350,7 @@ function App() {
   useEffect(() => {
     if (!hasIdentity) {
       setEntered(false);
+      setInferenceReady(false);
       presenceJoinedAs.current = null;
     }
   }, [hasIdentity]);
@@ -2371,13 +2374,14 @@ function App() {
   useEffect(() => {
     if (
       entered &&
+      inferenceReady &&
       localActor !== undefined &&
       presenceJoinedAs.current !== localActor.id
     ) {
       presenceJoinedAs.current = localActor.id;
       void enterRoom();
     }
-  }, [entered, localActor, enterRoom]);
+  }, [entered, inferenceReady, localActor, enterRoom]);
 
   const submitMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -2452,6 +2456,8 @@ function App() {
               setEntered(true);
             }}
           />
+        ) : !inferenceReady ? (
+          <ModelSetupScreen onReady={() => setInferenceReady(true)} />
         ) : (
           <>
         {membersOpen ? (
@@ -3380,7 +3386,7 @@ function App() {
         )}
       </div>
 
-      {entered ? (
+      {entered && inferenceReady ? (
         <StatusBar
           connectionLabel={connectionLabel}
           sending={sendMessage.isPending || sendContent.isPending}

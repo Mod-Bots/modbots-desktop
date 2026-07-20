@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
+mod models;
+
 #[cfg(windows)]
 use tauri::Manager;
 #[cfg(windows)]
@@ -204,6 +206,7 @@ pub fn run() {
         .plugin(tauri_plugin_upload::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(LoginCallbackState::default())
+        .manage(models::ModelDownloadState::default())
         .setup(|app| {
             #[cfg(windows)]
             attach_webview_process_recovery(app);
@@ -212,7 +215,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             await_login_callback,
-            cancel_login_callback
+            cancel_login_callback,
+            models::model_artifact_status,
+            models::download_model_artifact,
+            models::pause_model_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

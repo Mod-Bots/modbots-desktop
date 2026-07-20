@@ -2190,8 +2190,10 @@ dependencies = [
 name = "modbots-desktop"
 version = "0.0.1-alpha"
 dependencies = [
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3076,6 +3078,7 @@ dependencies = [
  "cookie",
  "cookie_store",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
