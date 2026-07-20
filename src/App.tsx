@@ -62,6 +62,7 @@ const appVersion = "0.0.1-alpha";
 const groupWindowMs = 45 * 1000;
 const browserLoginWaitMs = 90_000;
 const participantActiveWindowMs = 5 * 60 * 1000;
+const conversationPageSize = 100;
 
 const participantsPanel = { min: 200, max: 360, initial: 260 };
 const aboutPanel = { min: 230, max: 400, initial: 280 };
@@ -1628,6 +1629,9 @@ function App() {
     }));
   const [openRuleId, setOpenRuleId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [visibleEventCount, setVisibleEventCount] = useState(
+    conversationPageSize,
+  );
   const [replyTarget, setReplyTarget] = useState<RoomEvent | null>(null);
   // The active participant picker in the composer, opened by typing `@`.
   const [mention, setMention] = useState<{ query: string; index: number } | null>(
@@ -1641,6 +1645,7 @@ function App() {
   const [entered, setEntered] = useState(false);
   const presenceJoinedAs = useRef<string | null>(null);
   const conversationViewport = useRef<HTMLDivElement>(null);
+  const previousConversationHeight = useRef<number | null>(null);
   const conversationPositioned = useRef(false);
   const followLatestMessage = useRef(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1767,7 +1772,17 @@ function App() {
         );
       });
   }, [events.data, searchQuery]);
-  const timeline = useMemo(() => buildTimeline(roomEvents), [roomEvents]);
+  const hiddenEventCount = Math.max(0, roomEvents.length - visibleEventCount);
+  const visibleRoomEvents = useMemo(
+    () => roomEvents.slice(-visibleEventCount),
+    [roomEvents, visibleEventCount],
+  );
+  const timeline = useMemo(
+    () => buildTimeline(visibleRoomEvents),
+    [visibleRoomEvents],
+  );
+  const latestRoomEventSequence =
+    roomEvents[roomEvents.length - 1]?.sequence ?? null;
   // Replies reference the content item behind a message; this resolves the
   // reference back to the original message for the quoted line.
   const messagesByContentItem = useMemo(() => {
@@ -2199,6 +2214,16 @@ function App() {
     }
   };
 
+  const loadEarlierMessages = () => {
+    const viewport = conversationViewport.current;
+
+    previousConversationHeight.current = viewport?.scrollHeight ?? null;
+    followLatestMessage.current = false;
+    setVisibleEventCount((current) =>
+      Math.min(roomEvents.length, current + conversationPageSize),
+    );
+  };
+
   const handleConversationScroll = () => {
     const viewport = conversationViewport.current;
 
@@ -2209,6 +2234,14 @@ function App() {
     const distanceFromLatest =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
     followLatestMessage.current = distanceFromLatest <= 48;
+
+    if (
+      viewport.scrollTop <= 64 &&
+      hiddenEventCount > 0 &&
+      previousConversationHeight.current === null
+    ) {
+      loadEarlierMessages();
+    }
   };
 
   const menus: MenuSpec[] = [
@@ -2314,6 +2347,22 @@ function App() {
   }, [entered, roomId]);
 
   useEffect(() => {
+    setVisibleEventCount(conversationPageSize);
+  }, [roomId, searchQuery]);
+
+  useEffect(() => {
+    const previousHeight = previousConversationHeight.current;
+    const viewport = conversationViewport.current;
+
+    if (previousHeight === null || viewport === null) {
+      return;
+    }
+
+    previousConversationHeight.current = null;
+    viewport.scrollTop += viewport.scrollHeight - previousHeight;
+  }, [visibleEventCount]);
+
+  useEffect(() => {
     if (!entered || searchQuery.length > 0) {
       return;
     }
@@ -2322,7 +2371,7 @@ function App() {
       scrollToLatest();
       conversationPositioned.current = true;
     }
-  }, [entered, timeline.length, searchQuery]);
+  }, [entered, latestRoomEventSequence, searchQuery]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2782,49 +2831,51 @@ function App() {
                       </p>
                     </div>
                   ) : (
-                    timeline.map((item) => {
-                      if (item.kind === "day") {
-                        return <DayDivider key={item.key} label={item.label} />;
-                      }
+                    <>
+                      {timeline.map((item) => {
+                        if (item.kind === "day") {
+                          return <DayDivider key={item.key} label={item.label} />;
+                        }
 
-                      if (item.kind === "moderation") {
+                        if (item.kind === "moderation") {
+                          return (
+                            <ModerationEvent
+                              key={item.key}
+                              actors={actors}
+                              event={item.event}
+                              ruleTitles={ruleTitles}
+                            />
+                          );
+                        }
+
+                        const reply = payloadReply(item.event);
+                        const repliedEvent =
+                          reply === null
+                            ? null
+                            : (messagesByContentItem.get(reply.contentItemId) ??
+                              null);
+                        const canReply =
+                          localActor !== undefined &&
+                          payloadString(item.event, "contentItemId") !== null;
+
                         return (
-                          <ModerationEvent
+                          <ChatMessage
                             key={item.key}
                             actors={actors}
                             event={item.event}
-                            ruleTitles={ruleTitles}
+                            grouped={item.grouped}
+                            localActorId={localActor?.id}
+                            mentionLabels={mentionLabels}
+                            repliedEvent={repliedEvent}
+                            onReply={
+                              canReply
+                                ? () => setReplyTarget(item.event)
+                                : undefined
+                            }
                           />
                         );
-                      }
-
-                      const reply = payloadReply(item.event);
-                      const repliedEvent =
-                        reply === null
-                          ? null
-                          : (messagesByContentItem.get(reply.contentItemId) ??
-                            null);
-                      const canReply =
-                        localActor !== undefined &&
-                        payloadString(item.event, "contentItemId") !== null;
-
-                      return (
-                        <ChatMessage
-                          key={item.key}
-                          actors={actors}
-                          event={item.event}
-                          grouped={item.grouped}
-                          localActorId={localActor?.id}
-                          mentionLabels={mentionLabels}
-                          repliedEvent={repliedEvent}
-                          onReply={
-                            canReply
-                              ? () => setReplyTarget(item.event)
-                              : undefined
-                          }
-                        />
-                      );
-                    })
+                      })}
+                    </>
                   )}
                 </div>
               </div>
