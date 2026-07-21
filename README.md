@@ -2,16 +2,12 @@
 
 Mod Bots Desktop is the Tauri desktop client for the Mod Bots platform.
 
-## Development prerequisites
+## Prerequisites
 
-- Windows
 - Node.js 22 or newer
-- npm
-- Rust
-- The Tauri system prerequisites
-- The Mod Bots backend running locally
+- Rust and the Tauri system prerequisites
 
-## Run for development
+## Run
 
 Install dependencies and create the local environment file:
 
@@ -20,13 +16,10 @@ npm install
 Copy-Item .env.example .env
 ```
 
-Start the backend from the backend repository:
+Start the [Mod Bots backend](https://github.com/wsucauid798/modbots-backend) in
+another terminal.
 
-```powershell
-docker compose up --detach
-```
-
-Start the desktop app in development mode:
+Start the desktop app:
 
 ```powershell
 npm run tauri dev
