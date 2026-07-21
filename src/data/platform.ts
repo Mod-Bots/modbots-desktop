@@ -284,25 +284,14 @@ export const postRoomContent = (
   });
 
 export const getRoomEvents = async (roomId: string): Promise<RoomEvent[]> => {
-  const events: RoomEvent[] = [];
-  let cursor = "0";
+  const page = await requestJson<{
+    data: RoomEvent[];
+    nextCursor: string;
+  }>(
+    apiUrl(
+      `/api/rooms/${encodeURIComponent(roomId)}/events?latest=true&limit=300`,
+    ),
+  );
 
-  while (true) {
-    const page = await requestJson<{
-      data: RoomEvent[];
-      nextCursor: string;
-    }>(
-      apiUrl(
-        `/api/rooms/${encodeURIComponent(roomId)}/events?after=${cursor}&limit=500`,
-      ),
-    );
-
-    events.push(...page.data);
-
-    if (page.data.length < 500 || page.nextCursor === cursor) {
-      return events;
-    }
-
-    cursor = page.nextCursor;
-  }
+  return page.data;
 };

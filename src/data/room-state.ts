@@ -1,5 +1,7 @@
 import type { Actor, RoomEvent } from "./contracts";
 
+const maximumRoomEvents = 300;
+
 export const compareSequences = (left: string, right: string): number => {
   const leftSequence = BigInt(left);
   const rightSequence = BigInt(right);
@@ -25,9 +27,9 @@ export const mergeEvents = (
     events.set(event.sequence, event);
   }
 
-  return [...events.values()].sort((left, right) =>
-    compareSequences(left.sequence, right.sequence),
-  );
+  return [...events.values()]
+    .sort((left, right) => compareSequences(left.sequence, right.sequence))
+    .slice(-maximumRoomEvents);
 };
 
 export const onlineActorIds = (events: RoomEvent[]): string[] => {
