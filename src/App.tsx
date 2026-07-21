@@ -1,4 +1,12 @@
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
@@ -1102,6 +1110,63 @@ function ModerationEvent({
   );
 }
 
+const ConversationTimeline = memo(function ConversationTimeline({
+  actors,
+  items,
+  localActorId,
+  mentionLabels,
+  messagesByContentItem,
+  onReply,
+  ruleTitles,
+}: {
+  actors: Map<string, Actor>;
+  items: TimelineItem[];
+  localActorId: string | undefined;
+  mentionLabels: MentionLabel[];
+  messagesByContentItem: Map<string, RoomEvent>;
+  onReply: (event: RoomEvent) => void;
+  ruleTitles: Map<string, string>;
+}) {
+  return items.map((item) => {
+    if (item.kind === "day") {
+      return <DayDivider key={item.key} label={item.label} />;
+    }
+
+    if (item.kind === "moderation") {
+      return (
+        <ModerationEvent
+          key={item.key}
+          actors={actors}
+          event={item.event}
+          ruleTitles={ruleTitles}
+        />
+      );
+    }
+
+    const reply = payloadReply(item.event);
+    const repliedEvent =
+      reply === null
+        ? null
+        : (messagesByContentItem.get(reply.contentItemId) ?? null);
+    const canReply =
+      localActorId !== undefined &&
+      payloadString(item.event, "contentItemId") !== null;
+
+    return (
+      <ChatMessage
+        key={item.key}
+        actors={actors}
+        event={item.event}
+        grouped={item.grouped}
+        localActorId={localActorId}
+        mentionLabels={mentionLabels}
+        repliedEvent={repliedEvent}
+        onReply={canReply ? () => onReply(item.event) : undefined}
+      />
+    );
+  });
+});
+
 // One row of the Activity card: the headline number is always visible, the
 // breakdown sits behind the same expand grammar the Rules list uses.
 function ActivitySection({
@@ -1633,6 +1698,10 @@ function App() {
     conversationPageSize,
   );
   const [replyTarget, setReplyTarget] = useState<RoomEvent | null>(null);
+  const selectReplyTarget = useCallback(
+    (event: RoomEvent) => setReplyTarget(event),
+    [],
+  );
   // The active participant picker in the composer, opened by typing `@`.
   const [mention, setMention] = useState<{ query: string; index: number } | null>(
     null,
@@ -2831,51 +2900,15 @@ function App() {
                       </p>
                     </div>
                   ) : (
-                    <>
-                      {timeline.map((item) => {
-                        if (item.kind === "day") {
-                          return <DayDivider key={item.key} label={item.label} />;
-                        }
-
-                        if (item.kind === "moderation") {
-                          return (
-                            <ModerationEvent
-                              key={item.key}
-                              actors={actors}
-                              event={item.event}
-                              ruleTitles={ruleTitles}
-                            />
-                          );
-                        }
-
-                        const reply = payloadReply(item.event);
-                        const repliedEvent =
-                          reply === null
-                            ? null
-                            : (messagesByContentItem.get(reply.contentItemId) ??
-                              null);
-                        const canReply =
-                          localActor !== undefined &&
-                          payloadString(item.event, "contentItemId") !== null;
-
-                        return (
-                          <ChatMessage
-                            key={item.key}
-                            actors={actors}
-                            event={item.event}
-                            grouped={item.grouped}
-                            localActorId={localActor?.id}
-                            mentionLabels={mentionLabels}
-                            repliedEvent={repliedEvent}
-                            onReply={
-                              canReply
-                                ? () => setReplyTarget(item.event)
-                                : undefined
-                            }
-                          />
-                        );
-                      })}
-                    </>
+                    <ConversationTimeline
+                      actors={actors}
+                      items={timeline}
+                      localActorId={localActor?.id}
+                      mentionLabels={mentionLabels}
+                      messagesByContentItem={messagesByContentItem}
+                      onReply={selectReplyTarget}
+                      ruleTitles={ruleTitles}
+                    />
                   )}
                 </div>
               </div>
