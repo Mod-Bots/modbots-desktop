@@ -20,6 +20,7 @@ coverage/
 .env.*
 !.env.example
 !.env.development
+!.env.production
 *.local
 
 # Tauri and Rust build output
