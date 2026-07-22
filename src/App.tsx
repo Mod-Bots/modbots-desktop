@@ -1773,6 +1773,7 @@ function App() {
     );
   const roster = useMemo(() => {
     const now = Date.now();
+    const onlineIds = new Set(onlineActorIds);
     const onlineHumans = visibleOnlineActors.filter(
       (actor) => actor.type === "human",
     );
@@ -1796,7 +1797,10 @@ function App() {
           : "idle";
       }
 
-      if (state?.present !== true) {
+      // Presence comes from the roster, which the backend derives from the
+      // full event history; the client's bounded event window only informs
+      // recency, never presence.
+      if (!onlineIds.has(actor.id)) {
         return "offline";
       }
 
@@ -1820,7 +1824,7 @@ function App() {
       type,
       members: membersByType[type],
     }));
-  }, [actors, participantStatuses, visibleOnlineActors]);
+  }, [actors, onlineActorIds, participantStatuses, visibleOnlineActors]);
   const roomEvents = useMemo(() => {
     const query = searchQuery.trim().toLocaleLowerCase();
 
