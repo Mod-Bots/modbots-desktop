@@ -385,12 +385,27 @@ export const useRoomActivity = (roomId: string) => {
   useEffect(() => {
     const controller = new AbortController();
     let hasConnected = false;
+    let overviewInvalidation: number | null = null;
+
+    // Reconnects replay history in a burst; one overview refetch per replayed
+    // event floods the connection pool. Coalesce to at most one refetch per
+    // second no matter how fast events arrive.
+    const invalidateOverviewSoon = () => {
+      if (overviewInvalidation !== null) {
+        return;
+      }
+
+      overviewInvalidation = window.setTimeout(() => {
+        overviewInvalidation = null;
+        void queryClient.invalidateQueries({ queryKey: overviewKey });
+      }, 1_000);
+    };
 
     const onEvent = (event: RoomEvent) => {
       queryClient.setQueryData<RoomEvent[]>(eventsKey, (existing) =>
         mergeEvents(existing, [event]),
       );
-      void queryClient.invalidateQueries({ queryKey: overviewKey });
+      invalidateOverviewSoon();
     };
 
     const connect = async () => {
@@ -477,7 +492,13 @@ export const useRoomActivity = (roomId: string) => {
     };
 
     void connect();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+
+      if (overviewInvalidation !== null) {
+        window.clearTimeout(overviewInvalidation);
+      }
+    };
   }, [eventsKey, overviewKey, queryClient, roomId, rosterKey]);
 
   const refresh = async () => {
