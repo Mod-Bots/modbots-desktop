@@ -4,7 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   Actor,
   ContentAddress,
@@ -117,13 +117,14 @@ export const useRoomActivity = (roomId: string) => {
     queryFn: () => getRoomRoster(roomId),
     retry: 1,
   });
+  const fetchPersistedEvents = useCallback(async () => {
+    const persisted = await getRoomEvents(roomId);
+    const existing = queryClient.getQueryData<RoomEvent[]>(eventsKey);
+    return mergeEvents(existing, persisted);
+  }, [eventsKey, queryClient, roomId]);
   const events = useQuery({
     queryKey: eventsKey,
-    queryFn: async () => {
-      const persisted = await getRoomEvents(roomId);
-      const existing = queryClient.getQueryData<RoomEvent[]>(eventsKey);
-      return mergeEvents(existing, persisted);
-    },
+    queryFn: fetchPersistedEvents,
     // The desktop can start before the API. Give a Docker-backed service more
     // up to three minutes to become ready, then stop retrying and let the
     // interface show a clear unavailable state with an explicit Retry action.
@@ -409,6 +410,21 @@ export const useRoomActivity = (roomId: string) => {
     };
 
     const connect = async () => {
+      // Seed the replay cursor from persisted history before the first
+      // connection, so a fresh session asks the stream only for the gap
+      // since that history, never the whole room from sequence zero. The
+      // fetch dedupes with the events query; if the API is unreachable the
+      // stream still connects with whatever cursor exists.
+      try {
+        await queryClient.fetchQuery({
+          queryKey: eventsKey,
+          queryFn: fetchPersistedEvents,
+          retry: false,
+        });
+      } catch {
+        // The events query keeps retrying on its own schedule.
+      }
+
       while (!controller.signal.aborted) {
         const currentEvents =
           queryClient.getQueryData<RoomEvent[]>(eventsKey) ?? [];
@@ -499,7 +515,7 @@ export const useRoomActivity = (roomId: string) => {
         window.clearTimeout(overviewInvalidation);
       }
     };
-  }, [eventsKey, overviewKey, queryClient, roomId, rosterKey]);
+  }, [eventsKey, fetchPersistedEvents, overviewKey, queryClient, roomId, rosterKey]);
 
   const refresh = async () => {
     await Promise.all([
