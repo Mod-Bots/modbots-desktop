@@ -3,7 +3,7 @@
 ![Version: 0.0.1-alpha](https://img.shields.io/badge/version-0.0.1--alpha-14b8a6)
 ![Branch: release/v0.0.1-alpha](https://img.shields.io/badge/branch-release%2Fv0.0.1--alpha-64748b)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
-[![CI](https://github.com/wsucauid798/modbots-desktop/actions/workflows/ci.yml/badge.svg?branch=release/v0.0.1-alpha)](https://github.com/wsucauid798/modbots-desktop/actions/workflows/ci.yml)
+[![CI](https://github.com/Mod-Bots/modbots-desktop/actions/workflows/ci.yml/badge.svg?branch=release/v0.0.1-alpha)](https://github.com/Mod-Bots/modbots-desktop/actions/workflows/ci.yml)
 ![Tauri](https://img.shields.io/badge/app-Tauri-24C8DB?logo=tauri&logoColor=white)
 ![Vite](https://img.shields.io/badge/dev-Vite-646CFF?logo=vite&logoColor=white)
 ![Node.js 24](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)
@@ -26,7 +26,7 @@ npm install
 Copy-Item .env.example .env
 ```
 
-Start the [Mod Bots backend](https://github.com/wsucauid798/modbots-backend):
+Start the [Mod Bots backend](https://github.com/Mod-Bots/modbots-backend):
 
 ```powershell
 Set-Location modbots-backend

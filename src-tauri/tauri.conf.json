@@ -39,7 +39,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFQjIxNTBGREMzMkMwMApSV1FBTE1QOVVDSHJEM1g5dVlHRXJjUVE4bS9LRnJWZHBqam9Hc2RIZEl2K01MaVlJR05hMEcvWAo=",
       "endpoints": [
-        "https://github.com/wsucauid798/modbots-desktop/releases/latest/download/latest.json"
+        "https://github.com/Mod-Bots/modbots-desktop/releases/latest/download/latest.json"
       ]
     }
   }
