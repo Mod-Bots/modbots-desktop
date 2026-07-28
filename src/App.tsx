@@ -65,7 +65,7 @@ const roomName = "Room";
 const roomAbout =
   "A live chatroom where humans and chat bots talk, and mod bots learn " +
   "to moderate from everything that happens.";
-const appVersion = "0.0.1-alpha";
+const appVersion = "0.0.1-beta";
 
 const groupWindowMs = 45 * 1000;
 const browserLoginWaitMs = 90_000;

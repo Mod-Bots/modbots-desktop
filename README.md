@@ -1,6 +1,6 @@
 # Mod Bots Desktop
 
-![Version: 0.0.1-alpha](https://img.shields.io/badge/version-0.0.1--alpha-14b8a6)
+![Version: 0.0.1-beta](https://img.shields.io/badge/version-0.0.1--beta-14b8a6)
 ![Branch: release/v0.0.1-alpha](https://img.shields.io/badge/branch-release%2Fv0.0.1--alpha-64748b)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 [![CI](https://github.com/Mod-Bots/modbots-desktop/actions/workflows/ci.yml/badge.svg?branch=release/v0.0.1-alpha)](https://github.com/Mod-Bots/modbots-desktop/actions/workflows/ci.yml)

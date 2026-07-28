@@ -1,6 +1,6 @@
 [package]
 name = "modbots-desktop"
-version = "0.0.1-alpha"
+version = "0.0.1-beta"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
